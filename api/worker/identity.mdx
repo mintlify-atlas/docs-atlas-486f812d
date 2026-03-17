@@ -1,0 +1,163 @@
+---
+title: "Worker identity"
+description: "Retrieve a worker agent's persistent identity, manifesto, and Storacha configuration"
+---
+
+## GET /api/knowledge/identity
+
+Returns the worker agent's loaded identity context — its manifesto (values, role, guidelines), learned preferences, recent voting decisions, and Storacha configuration.
+
+This identity is loaded from Storacha on each startup and used by the AI model to provide consistent, persistent voting behavior across proposals.
+
+```bash
+curl http://localhost:3001/api/knowledge/identity
+```
+
+### Response fields
+
+<ResponseField name="manifesto" type="object">
+  The agent's core identity
+
+  <Expandable title="manifesto fields">
+    <ResponseField name="name" type="string">
+      Agent name (e.g., `Worker Alpha`)
+    </ResponseField>
+    <ResponseField name="role" type="string">
+      Agent role description
+    </ResponseField>
+    <ResponseField name="guidelines" type="string">
+      Voting guidelines this agent follows
+    </ResponseField>
+    <ResponseField name="values" type="string[]">
+      Core values that guide the agent's decisions
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="preferences" type="object">
+  Learned voting preferences and weights
+
+  <Expandable title="preferences fields">
+    <ResponseField name="votingWeights" type="Record<string, number>">
+      Topic-specific voting weight adjustments
+    </ResponseField>
+    <ResponseField name="knowledgeNotes" type="string[]">
+      Knowledge notes fed to this worker via POST /api/knowledge/feed
+    </ResponseField>
+    <ResponseField name="updatedAt" type="string">
+      ISO 8601 timestamp of last preference update
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="recentDecisions" type="object[]">
+  Recent voting decisions (last N proposals this agent voted on)
+</ResponseField>
+
+<ResponseField name="formatted" type="string">
+  Pre-formatted identity context string passed to the AI model as system prompt
+</ResponseField>
+
+<ResponseField name="storacha" type="object">
+  Storacha configuration status
+
+  <Expandable title="storacha fields">
+    <ResponseField name="configured" type="boolean">
+      Whether Storacha is configured for this worker
+    </ResponseField>
+    <ResponseField name="agentDid" type="string | null">
+      The worker's `did:key` identity, or `null` if Storacha is not configured
+    </ResponseField>
+    <ResponseField name="spaceDid" type="string | null">
+      The Storacha space DID, or `null` if not configured
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+### Example response
+
+```json
+{
+  "manifesto": {
+    "name": "Worker Alpha",
+    "role": "Independent AI governance voter",
+    "guidelines": "Vote in alignment with the DAO manifesto. Prioritize long-term ecosystem health.",
+    "values": ["transparency", "decentralization", "sustainability"]
+  },
+  "preferences": {
+    "votingWeights": {
+      "grants": 1.2,
+      "infrastructure": 1.5
+    },
+    "knowledgeNotes": [],
+    "updatedAt": "2025-01-10T08:00:00.000Z"
+  },
+  "recentDecisions": [],
+  "formatted": "You are Worker Alpha, an Independent AI governance voter...",
+  "storacha": {
+    "configured": true,
+    "agentDid": "did:key:z6MkWorker1abc",
+    "spaceDid": "did:key:z6MkSpace123"
+  }
+}
+```
+
+---
+
+## POST /api/knowledge/feed
+
+Feeds knowledge notes and voting weight updates to the agent. These are persisted to Storacha and used in future deliberations.
+
+```bash
+curl -X POST http://localhost:3001/api/knowledge/feed \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "notes": ["The DAO treasury currently holds 50,000 NEAR"],
+    "votingWeights": { "grants": 1.5 }
+  }'
+```
+
+### Request body
+
+<ParamField body="notes" type="string[]">
+  Knowledge notes to append to the agent's persistent knowledge base
+</ParamField>
+
+<ParamField body="votingWeights" type="Record<string, number>">
+  Topic voting weights to update (merged with existing weights)
+</ParamField>
+
+---
+
+## POST /api/knowledge/manifesto
+
+Updates the agent's core manifesto. Changes persist to Storacha.
+
+```bash
+curl -X POST http://localhost:3001/api/knowledge/manifesto \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name": "Worker Alpha",
+    "role": "Independent AI governance voter",
+    "guidelines": "Vote in alignment with the DAO manifesto.",
+    "values": ["transparency", "decentralization"]
+  }'
+```
+
+### Request body
+
+<ParamField body="name" type="string">
+  Agent name
+</ParamField>
+
+<ParamField body="role" type="string">
+  Agent role description
+</ParamField>
+
+<ParamField body="guidelines" type="string">
+  Voting guidelines
+</ParamField>
+
+<ParamField body="values" type="string[]">
+  Core values array
+</ParamField>

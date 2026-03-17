@@ -1,0 +1,127 @@
+---
+title: "How it works"
+description: "A walkthrough of Delibera's 9-step voting lifecycle, privacy model, and key architectural patterns."
+---
+
+Delibera coordinates independent AI agents to deliberate on DAO proposals. Individual reasoning stays private off-chain, while only aggregate tallies settle on the NEAR blockchain. Here is how a full vote flows from submission to on-chain finality.
+
+## Voting lifecycle
+
+<Steps>
+  <Step title="User submits a proposal">
+    A governance participant calls `submit_proposal` on the NEAR Coordinator Contract. The contract stores the proposal text on-chain (publicly readable) and creates a **yielded promise** — execution pauses and the contract waits for an off-chain result before continuing.
+  </Step>
+
+  <Step title="Contract yields execution">
+    The NEAR yield/resume pattern suspends contract execution at the point of proposal submission. No gas is burned waiting; the contract simply records a pending callback that the coordinator agent will later fulfill with `resume_with_result`.
+  </Step>
+
+  <Step title="Coordinator agent detects the pending proposal">
+    The Coordinator Agent polls Ensue shared memory on a configurable interval (`POLL_INTERVAL`, default 5 000 ms). When it detects a new pending proposal, it reads the task configuration and begins dispatching work to voter agents.
+  </Step>
+
+  <Step title="Coordinator dispatches to voter agents">
+    The coordinator fans out the proposal to N independent Worker Agents (voter agents). Each worker receives the full proposal text and a timeout window. The coordinator records a snapshot of participating worker DIDs in Ensue so the expected vote count is fixed for this round.
+  </Step>
+
+  <Step title="Each voter agent deliberates">
+    Every Worker Agent independently:
+
+    1. Fetches the DAO manifesto from the NEAR Coordinator Contract (`get_manifesto`).
+    2. Loads its **persistent agent identity** — values, knowledge base, and decision history stored in its Storacha-backed profile.
+    3. Calls **NEAR AI (DeepSeek-V3.1)** with the proposal text and manifesto to reason about the vote.
+    4. Receives a **NEAR AI verification proof** — a TEE-signed attestation that cryptographically identifies which model ran and inside which hardware environment.
+    5. Writes its vote (`Approved` / `Rejected`) plus its full reasoning text to **Ensue shared memory** under its unique `did:key` namespace.
+
+    <Note>
+      Individual votes and reasoning never leave Ensue. Nothing written in this step touches the blockchain.
+    </Note>
+  </Step>
+
+  <Step title="Coordinator tallies the votes">
+    Once all workers have written their results (or the timeout elapses), the Coordinator Agent reads all vote records from Ensue using the fixed worker snapshot. It counts approvals and rejections, producing an `OnChainResult` object that contains **only counts** — no individual reasoning, no per-agent attribution.
+  </Step>
+
+  <Step title="Aggregate tally goes on-chain">
+    The coordinator calls `resume_with_result` on the NEAR Coordinator Contract, submitting only the aggregate tally (e.g., `3 Approved, 0 Rejected`). The contract records the decision on-chain as a public, auditable fact.
+  </Step>
+
+  <Step title="Contract resumes with the final decision">
+    The yielded promise from Step 2 is fulfilled. The contract stores the `Approved` or `Rejected` decision against the proposal and emits the result. Any downstream on-chain logic (treasury disbursement, parameter changes, etc.) can now execute.
+  </Step>
+
+  <Step title="Deliberation transcript is encrypted and archived">
+    After the vote settles, the coordinator encrypts the full deliberation transcript (all reasoning, per-agent votes, and NEAR AI proofs) using **Lit Protocol threshold encryption** and uploads the ciphertext to **Storacha**. Storacha automatically arranges a **Filecoin** storage deal for permanent, verifiable archival.
+  </Step>
+</Steps>
+
+---
+
+## Privacy model
+
+Delibera separates *what is public* from *what stays private* by design. The blockchain sees only what governance requires for legitimacy.
+
+| Data | Location | Visibility |
+|------|----------|------------|
+| Proposal text | NEAR blockchain | Public |
+| DAO manifesto | NEAR blockchain | Public |
+| Aggregate tally (N Approved, M Rejected) | NEAR blockchain | Public |
+| Final decision (Approved / Rejected) | NEAR blockchain | Public |
+| Worker submission hashes (nullifier) | NEAR blockchain | Public |
+| Individual AI votes | Ensue shared memory | Private |
+| AI reasoning / deliberation | Ensue shared memory | Private |
+| NEAR AI verification proofs | Ensue shared memory | Private |
+| Encrypted transcripts | Storacha (Lit-encrypted) | Private (threshold decryption) |
+| Filecoin archival records | Storacha + Filecoin | Private (encrypted at rest) |
+| FHE-encrypted ballots (V2) | Zama fhEVM chain | Encrypted (FHE) |
+
+---
+
+## NEAR yield/resume pattern
+
+The NEAR yield/resume pattern allows a smart contract to pause mid-execution and wait for an external result — without polling, without gas burn, and without blocking other contract calls.
+
+When `submit_proposal` is called, the contract creates a **promise callback** tied to the proposal ID and returns immediately. The contract's state machine holds the proposal in `Created` status. The coordinator agent later calls `resume_with_result`, which triggers the callback, transitions the proposal to `Finalized`, and stores the tally on-chain.
+
+This avoids the need for the contract to trust or query external HTTP endpoints directly. The TEE-attested coordinator agent is the sole party authorized to resume a yielded proposal.
+
+---
+
+## Ensue shared memory role
+
+**Ensue Memory Network** is the off-chain coordination backbone for Delibera. It provides a key-value store accessible over JSON-RPC 2.0 and Server-Sent Events (SSE) that all agents share.
+
+Ensue keys follow a structured path hierarchy:
+
+```
+coordination/
+├── coordinator/{tally, status, proposal_id}
+├── tasks/{workerId}/{status, result, timestamp, error, verification_proof}
+├── proposals/{proposalId}/{config, status, tally, workers/{workerId}/...}
+├── config/{task_definition, contract_address}
+└── agents/{agentId}/{endpoint, type, cvm_id, updated_at}
+```
+
+During a vote:
+- The **coordinator** writes `status` and `proposal_id`; reads worker results.
+- Each **worker** writes its own `status`, `result`, `timestamp`, and `verification_proof` under its `did:key`-namespaced path.
+
+All vote data in Ensue is **ephemeral by default** for the current round; the coordinator archives completed proposal data under `coordination/proposals/{id}/` before starting a new round.
+
+---
+
+## TEE attestation verification proofs
+
+Every NEAR AI inference returns a `VerificationProof` alongside the model response. This proof is a cryptographic receipt that contains:
+
+| Field | Description |
+|-------|-------------|
+| `chat_id` | Unique identifier for the inference session |
+| `model` | The exact model version that ran (e.g., `deepseek-v3`) |
+| `request_hash` | SHA-256 hash of the input prompt |
+| `response_hash` | SHA-256 hash of the model output |
+| `signature` | ECDSA signature over the above fields |
+| `signing_address` | The TEE-controlled key that signed the proof |
+| `attestation_report` | Intel TDX / NVIDIA hardware attestation linking the signing key to verified TEE hardware |
+
+The proof is stored in Ensue alongside the vote. It does **not** reveal the vote content — `response_hash` is a one-way hash — but it proves that a specific, verifiable model running inside audited hardware produced the reasoning. This creates an auditable chain of custody from model inference to on-chain decision, without exposing private deliberation data.

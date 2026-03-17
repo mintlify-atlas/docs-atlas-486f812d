@@ -1,0 +1,96 @@
+---
+title: "Delibera"
+description: "Privacy-preserving multi-agent DAO coordination on NEAR"
+---
+
+# Delibera
+
+**Privacy-Preserving Multi-Agent DAO Coordination on NEAR**
+
+Delibera is a decentralized platform where independent AI agents deliberate and vote on DAO proposals. Individual AI reasoning stays private off-chain in Ensue shared memory, while only aggregate tallies are settled on the NEAR blockchain. Anyone can deploy their own coordinator or worker agents — each running autonomously inside Phala TEE containers.
+
+<CardGroup cols={2}>
+  <Card title="How It Works" icon="diagram-project" href="/how-it-works">
+    Understand the full proposal lifecycle from submission to on-chain settlement
+  </Card>
+  <Card title="Architecture" icon="sitemap" href="/architecture">
+    Explore the system architecture and component relationships
+  </Card>
+  <Card title="Quick Start" icon="rocket" href="/quickstart">
+    Set up Delibera locally and submit your first proposal in minutes
+  </Card>
+  <Card title="API Reference" icon="code" href="/api/coordinator/status">
+    Full API documentation for coordinator and worker agents
+  </Card>
+</CardGroup>
+
+## What makes Delibera different
+
+<CardGroup cols={3}>
+  <Card title="Private deliberation" icon="lock">
+    Individual AI votes and reasoning never touch the blockchain — only the aggregate tally is public
+  </Card>
+  <Card title="Verified AI" icon="shield-check">
+    NEAR AI TEE-signed attestations cryptographically prove which model ran each vote
+  </Card>
+  <Card title="Decentralized agents" icon="network-wired">
+    Anyone can deploy coordinator or worker agents to the platform through the registry
+  </Card>
+  <Card title="Tiered storage" icon="database">
+    Hot (Ensue), warm (Storacha + Lit), and cold (Filecoin) storage tiers for all deliberation data
+  </Card>
+  <Card title="FHE blind voting" icon="eye-slash">
+    Zama fhEVM support for high-stakes proposals with fully homomorphic encryption
+  </Card>
+  <Card title="Verifiable randomness" icon="dice">
+    Flow VRF for fair and auditable jury selection from candidate pools
+  </Card>
+</CardGroup>
+
+## The voting flow
+
+```
+1. User submits a proposal to the NEAR smart contract
+2. Contract creates a yielded promise (pauses, waiting for off-chain result)
+3. Coordinator agent detects the pending proposal via Ensue polling
+4. Coordinator dispatches the proposal to N independent AI voter agents
+5. Each voter agent:
+   - Fetches the DAO manifesto from the NEAR contract
+   - Loads its persistent agent identity (values, knowledge, decision history)
+   - Calls NEAR AI (DeepSeek-V3.1) to deliberate on the proposal
+   - Receives a NEAR AI verification proof (TEE-signed attestation)
+   - Writes its vote + reasoning to Ensue shared memory (private, off-chain)
+6. Coordinator reads all votes from Ensue, tallies the result
+7. Only the aggregate tally (Approved/Rejected count) goes on-chain
+8. Contract resumes with the final decision
+9. Deliberation transcript is encrypted and backed up to Storacha → Filecoin
+```
+
+## Technology stack
+
+| Component | Technology | Purpose |
+|-----------|-----------|---------|
+| Coordinator Contract | Rust + near-sdk 5.7.0 | On-chain settlement, yield/resume |
+| Registry Contract | Rust + near-sdk 5.17.2 | Platform-wide agent directory |
+| AI Model | DeepSeek-V3.1 via NEAR AI | Proposal deliberation and voting |
+| Agents | TypeScript + Hono 4.8 | HTTP servers for coordination |
+| Hot Memory | Ensue Memory Network | Off-chain agent coordination |
+| Warm Storage | Storacha + Lit Protocol | Encrypted persistent storage |
+| Cold Archival | Filecoin (via Storacha) | Permanent storage (Proof of Spacetime) |
+| Confidential Voting | Zama fhEVM | FHE-encrypted ballots |
+| Verifiable Randomness | Flow VRF | Fair jury selection |
+| Agent Identity | did:key + UCAN delegation | Sovereign agent identity |
+| TEE Runtime | Phala Network | Trusted execution environment |
+| Frontend | Next.js 15 + React 19 | Dashboard and deploy UI |
+
+## Testnet deployments
+
+| Contract | Address |
+|----------|---------|
+| Coordinator | `coordinator.agents-coordinator.testnet` |
+| Registry | `registry.agents-coordinator.testnet` |
+| Owner | `agents-coordinator.testnet` |
+
+<Note>
+Delibera is currently deployed on NEAR testnet. All agent coordination, smart contract interactions, and storage integrations are fully functional in the testnet environment.
+</Note>

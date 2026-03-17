@@ -1,0 +1,136 @@
+---
+title: "Jury selection"
+description: "Select and verify a random jury from a candidate pool using Flow VRF"
+---
+
+Delibera supports verifiable random jury selection using the Flow blockchain's VRF beacon. The same VRF seed always produces the same jury, making selections auditable and tamper-proof.
+
+## POST /api/coordinate/select-jury
+
+Selects a jury from a candidate pool using Flow VRF. The VRF seed is fetched from the Flow testnet's latest block, ensuring the selection is unpredictable and verifiable.
+
+```bash
+curl -X POST http://localhost:3000/api/coordinate/select-jury \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "pool": ["alice.near", "bob.near", "carol.near", "dave.near", "eve.near"],
+    "jurySize": 3,
+    "deliberationId": "delib-proposal-7"
+  }'
+```
+
+### Request body
+
+<ParamField body="pool" type="string[]" required>
+  The candidate pool to select from. Must be a non-empty array of NEAR account IDs or other identifiers.
+</ParamField>
+
+<ParamField body="jurySize" type="number">
+  Number of jurors to select. Must be less than or equal to the pool size. Defaults to `3`.
+</ParamField>
+
+<ParamField body="deliberationId" type="string">
+  Optional context identifier for this jury selection. Used for logging and auditability.
+</ParamField>
+
+### Response fields
+
+<ResponseField name="jury" type="string[]">
+  The selected jury members (subset of the pool)
+</ResponseField>
+
+<ResponseField name="vrfSeed" type="string">
+  The VRF seed used for selection. Store this to verify the selection later.
+</ResponseField>
+
+<ResponseField name="vrfProof" type="string">
+  Proof string referencing the Flow block that provided the randomness (format: `flow-testnet:<blockHeight>:<blockId>`)
+</ResponseField>
+
+<ResponseField name="timestamp" type="string">
+  ISO 8601 timestamp of the selection
+</ResponseField>
+
+### Example response
+
+```json
+{
+  "jury": ["carol.near", "alice.near", "eve.near"],
+  "vrfSeed": "1234567890abcdef",
+  "vrfProof": "flow-testnet:12345678:abc123def456",
+  "timestamp": "2025-01-15T10:00:00.000Z"
+}
+```
+
+### Error responses
+
+```json
+// 400: Empty pool
+{ "error": "pool must be a non-empty array of candidate IDs" }
+
+// 400: Jury size exceeds pool
+{ "error": "jurySize (5) exceeds pool size (3)" }
+```
+
+---
+
+## POST /api/coordinate/verify-jury
+
+Verifies that a jury selection is deterministic given the same VRF seed and pool. Use this to independently audit any prior selection.
+
+```bash
+curl -X POST http://localhost:3000/api/coordinate/verify-jury \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "pool": ["alice.near", "bob.near", "carol.near", "dave.near", "eve.near"],
+    "jurySize": 3,
+    "vrfSeed": "1234567890abcdef"
+  }'
+```
+
+### Request body
+
+<ParamField body="pool" type="string[]" required>
+  The original candidate pool used in the selection
+</ParamField>
+
+<ParamField body="jurySize" type="number">
+  The jury size used in the original selection. Defaults to `3`.
+</ParamField>
+
+<ParamField body="vrfSeed" type="string" required>
+  The VRF seed from the original selection to verify against
+</ParamField>
+
+### Response fields
+
+<ResponseField name="jury" type="string[]">
+  The jury that results from the given seed (should match the original selection)
+</ResponseField>
+
+<ResponseField name="vrfSeed" type="string">
+  The VRF seed used for verification
+</ResponseField>
+
+<ResponseField name="verified" type="boolean">
+  Always `true` when the endpoint succeeds
+</ResponseField>
+
+<ResponseField name="timestamp" type="string">
+  ISO 8601 timestamp
+</ResponseField>
+
+### Example response
+
+```json
+{
+  "jury": ["carol.near", "alice.near", "eve.near"],
+  "vrfSeed": "1234567890abcdef",
+  "verified": true,
+  "timestamp": "2025-01-15T10:05:00.000Z"
+}
+```
+
+<Note>
+  The same `pool`, `jurySize`, and `vrfSeed` always produce the same `jury`. This determinism is what makes the selection independently verifiable by any party.
+</Note>

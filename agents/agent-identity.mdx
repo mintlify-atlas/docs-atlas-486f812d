@@ -1,0 +1,172 @@
+---
+title: "Agent identity"
+description: "How each Delibera agent gets a sovereign did:key identity, delegated Storacha access, and a human-readable display name."
+---
+
+Every agent in Delibera — coordinators and workers alike — has a sovereign cryptographic identity based on the W3C `did:key` standard. The identity is derived from an Ed25519 private key managed by the Storacha CLI. This key is the agent's root of trust: it generates the DID, signs UCAN delegations, and authenticates against Storacha.
+
+<Columns cols={2}>
+  <Card title="did:key" icon="key">
+    A `did:key` is a self-sovereign identifier derived entirely from a public key — no registry, no blockchain lookup required. It looks like `did:key:z6Mk...`.
+  </Card>
+  <Card title="UCAN delegation" icon="file-certificate">
+    User Controlled Authorization Networks (UCAN) allow a space owner to delegate specific Storacha capabilities (upload, list, decrypt) to an agent's DID without sharing any secret.
+  </Card>
+</Columns>
+
+## Why each agent needs its own identity
+
+Ensue stores agent state under DID-keyed paths (e.g., `worker/{did}/status`, `worker/{did}/result`). If two workers shared the same DID, they would overwrite each other's results in Ensue, making it impossible for the coordinator to collect independent votes.
+
+Each unique `STORACHA_AGENT_PRIVATE_KEY` produces a unique Ed25519 key pair and therefore a unique `did:key`. This is the mechanism that gives every worker agent a separate memory namespace in Ensue and a separate identity in the NEAR registry.
+
+<Warning>
+Never reuse a `STORACHA_AGENT_PRIVATE_KEY` across different agent instances. Doing so causes the instances to share an Ensue namespace, which breaks vote collection and tally aggregation.
+</Warning>
+
+## Setting up a Storacha identity
+
+You need to run these steps once per agent instance. The Storacha CLI manages key generation and delegation creation.
+
+<Steps>
+  <Step title="Install the Storacha CLI">
+    ```bash
+    npm install -g @storacha/cli
+    ```
+  </Step>
+  <Step title="Log in (one time per machine)">
+    ```bash
+    storacha login you@example.com
+    ```
+  </Step>
+  <Step title="Create a space (one time per deployment)">
+    ```bash
+    storacha space create delibera-v2
+    storacha space provision --provider did:web:storacha.network
+    ```
+  </Step>
+  <Step title="Generate an agent key">
+    Run this once per agent instance. Each run produces a unique key pair.
+
+    ```bash
+    storacha key create
+    # Output:
+    # Private key: MgCZG7EqHMRRMq7aBqDmUkzFpXa...
+    # Agent DID:   did:key:z6Mk...
+    ```
+
+    Save the private key as `STORACHA_AGENT_PRIVATE_KEY` in the agent's `.env` file.
+  </Step>
+  <Step title="Create a delegation for the agent">
+    Grant the agent's DID the capabilities it needs:
+
+    ```bash
+    storacha delegation create <AGENT_DID> \
+      --can 'space/blob/add' --can 'space/index/add' \
+      --can 'upload/add' --can 'upload/list' \
+      --can 'space/content/decrypt' \
+      -o delegation.car
+
+    base64 delegation.car
+    # Output: the base64 value for STORACHA_DELEGATION_PROOF
+    ```
+
+    Replace `<AGENT_DID>` with the `did:key:z6Mk...` value from the previous step.
+  </Step>
+  <Step title="Set environment variables">
+    Add the values to the agent's environment file:
+
+    ```bash
+    STORACHA_AGENT_PRIVATE_KEY=MgCZG7EqHMRRMq7aBqDmUkzFpXa...
+    STORACHA_DELEGATION_PROOF=mAYBBhQB...   # base64-encoded CAR
+    STORACHA_SPACE_DID=did:key:z6Mk...      # the space DID (for verification)
+    ```
+  </Step>
+</Steps>
+
+## Environment variables
+
+<ParamField body="STORACHA_AGENT_PRIVATE_KEY" type="string" required>
+  Ed25519 private key in the multikey format produced by `storacha key create` (starts with `MgC`). This is the agent's root secret — keep it safe.
+</ParamField>
+
+<ParamField body="STORACHA_DELEGATION_PROOF" type="string" required>
+  Base64-encoded UCAN delegation CAR file. Authorises the agent's DID to upload to and list content in the Storacha space.
+</ParamField>
+
+<ParamField body="STORACHA_SPACE_DID" type="string">
+  The DID of the Storacha space. Optional, used for logging and verification only.
+</ParamField>
+
+## How the DID is derived
+
+At startup, each agent calls `getAgentDid()` from `worker-agent/src/storacha/identity.ts`. This function parses the private key with `@storacha/client/principal/ed25519`, which produces an Ed25519 signer. The signer's `.did()` method returns the `did:key:z6Mk...` identifier.
+
+```typescript
+import { Signer } from '@storacha/client/principal/ed25519';
+
+const signer = Signer.parse(process.env.STORACHA_AGENT_PRIVATE_KEY);
+const did = signer.did(); // → 'did:key:z6Mk...'
+```
+
+The DID is deterministic: the same private key always produces the same DID. This means you can restart an agent and it will resume with the same Ensue namespace and registry identity.
+
+## UCAN delegation
+
+UCAN delegation follows the capability chain pattern. The space owner (your login email) generates a signed capability token (the `.car` file) that delegates specific permissions to the agent's DID. The agent presents this token as a proof when initialising the Storacha client:
+
+```typescript
+const client = await StorachaClient.create({ principal: signer, store: new StoreMemory() });
+const proof = await parseProof(process.env.STORACHA_DELEGATION_PROOF);
+const space = await client.addSpace(proof);
+await client.setCurrentSpace(space.did());
+```
+
+The delegation is additive: you can create multiple delegations for different agents pointing to the same space. Each agent can only perform the capabilities you granted — no agent can exceed the permissions in its delegation.
+
+<Tip>
+Use separate Storacha spaces for coordinator and worker agents if you want to isolate their storage quotas or billing.
+</Tip>
+
+## Display names
+
+While `did:key` identifiers are globally unique, they are hard to read. Delibera provides a display name layer on top, stored in Ensue at `agent/{did}/display_name`.
+
+You can set a display name in two ways:
+
+**Via environment variable** (set on startup):
+
+```bash
+# In the worker's .env file
+WORKER_DISPLAY_NAME=Worker Alpha
+```
+
+The worker writes this name to Ensue during `initializeWorker()`.
+
+**Via the coordinator API** (update at any time):
+
+```bash
+curl -X PATCH \
+  'http://localhost:3000/api/coordinate/workers/did%3Akey%3Az6MkAbc.../name' \
+  -H 'Content-Type: application/json' \
+  -d '{"name": "Worker Alpha"}'
+```
+
+The coordinator's `NameResolver` class caches display names in memory and resolves them in batch before returning worker lists or proposal details. Display names appear in:
+
+- `GET /api/coordinate/workers` — `display_name` field on each worker
+- `GET /api/coordinate/proposals/:id` — resolved names in the tally's `workerNames` map
+
+<Note>
+Display names are stored in Ensue, not on the NEAR blockchain. They persist as long as the Ensue memory entry exists and are not part of any on-chain record.
+</Note>
+
+## Identity in production (Phala TEE)
+
+In production, agent processes run inside Phala CVM containers. The TEE provides hardware-level isolation, meaning the private key never leaves the secure enclave. The Phala CVM ID is stored alongside the agent's DID in the registry contract, allowing verifiers to cross-reference the on-chain registration with the TEE attestation.
+
+Set `PHALA_CVM_ID` in the agent's environment to record the CVM identifier during self-registration:
+
+```bash
+PHALA_CVM_ID=cvm-abc123
+```

@@ -1,0 +1,231 @@
+---
+title: 'Local development'
+description: 'Run the full Delibera stack on your machine — coordinator, workers, protocol API, and frontend — using run-dev.sh.'
+keywords: ['local development', 'run-dev', 'setup', 'dev environment', 'ports']
+---
+
+This guide walks you through running the complete Delibera stack locally. All agents run in `LOCAL_MODE=true`, which skips Phala TEE initialization and uses a local NEAR seed phrase instead.
+
+## Prerequisites
+
+Before you start, verify you have:
+
+<Steps>
+  <Step title="Check Node.js version">
+    ```bash
+    node --version  # Must be 22 or later
+    ```
+  </Step>
+
+  <Step title="Check Rust and WASM target">
+    Only required if you intend to build contracts locally.
+    ```bash
+    rustup target list --installed | grep wasm32-unknown-unknown
+    # If missing: rustup target add wasm32-unknown-unknown
+    ```
+  </Step>
+
+  <Step title="Gather API keys">
+    You need:
+    - A NEAR testnet account with credentials (create at [testnet.mynearwallet.com](https://testnet.mynearwallet.com))
+    - An [Ensue API key](https://ensue.dev)
+    - A [NEAR AI API key](https://cloud-api.near.ai)
+    - (Optional) Storacha credentials — see [Storacha and Filecoin](/integrations/storacha-filecoin)
+  </Step>
+</Steps>
+
+## Port assignments
+
+| Service | Port | URL |
+|---------|------|-----|
+| Coordinator agent | 3000 | `http://localhost:3000` |
+| Worker 1 | 3001 | `http://localhost:3001` |
+| Worker 2 | 3002 | `http://localhost:3002` |
+| Worker 3 | 3003 | `http://localhost:3003` |
+| Frontend | 3004 | `http://localhost:3004` |
+| Protocol API | 3005 | `http://localhost:3005` |
+
+## Build the shared library
+
+The shared library must be compiled before any agent can start:
+
+```bash
+cd shared && npm install && npm run build
+```
+
+## Configure environment files
+
+Each service reads its own `.env` file. Copy the values below and fill in your credentials.
+
+### Coordinator agent
+
+Create `coordinator-agent/.env.development.local`:
+
+```bash
+PORT=3000
+LOCAL_MODE=true
+NEAR_NETWORK=testnet
+NEAR_ACCOUNT_ID=agents-coordinator.testnet
+NEAR_SEED_PHRASE="your twelve word seed phrase here"
+NEXT_PUBLIC_contractId=coordinator.agents-coordinator.testnet
+NEAR_API_KEY=your-near-ai-api-key
+WORKERS=worker1:3001,worker2:3002,worker3:3003
+POLL_INTERVAL=5000
+
+# Ensue (required)
+ENSUE_API_KEY=your-ensue-api-key
+ENSUE_TOKEN=your-ensue-api-key
+
+# Storacha (optional — leave blank to skip encrypted backups)
+STORACHA_AGENT_PRIVATE_KEY=
+STORACHA_DELEGATION_PROOF=
+STORACHA_SPACE_DID=
+
+# Lit Protocol (optional — only needed when Storacha is configured)
+LIT_NETWORK=datil
+```
+
+### Worker agents
+
+Create separate env files for each worker. The only differences are `WORKER_ID` and `PORT`.
+
+`worker-agent/.env.worker1.local`:
+```bash
+WORKER_ID=worker1
+PORT=3001
+ENSUE_API_KEY=your-ensue-api-key
+ENSUE_TOKEN=your-ensue-api-key
+NEAR_API_KEY=your-near-ai-api-key
+NEXT_PUBLIC_contractId=coordinator.agents-coordinator.testnet
+
+# Storacha (optional — unique per worker)
+STORACHA_AGENT_PRIVATE_KEY=
+STORACHA_DELEGATION_PROOF=
+STORACHA_SPACE_DID=
+```
+
+Repeat for `worker-agent/.env.worker2.local` (`WORKER_ID=worker2`, `PORT=3002`) and `worker-agent/.env.worker3.local` (`WORKER_ID=worker3`, `PORT=3003`).
+
+### Frontend
+
+Create `frontend/.env.local`:
+
+```bash
+NEXT_PUBLIC_COORDINATOR_URL=http://localhost:3000
+NEXT_PUBLIC_NEAR_NETWORK=testnet
+NEXT_PUBLIC_contractId=coordinator.agents-coordinator.testnet
+NEXT_PUBLIC_REGISTRY_CONTRACT_ID=registry.agents-coordinator.testnet
+```
+
+## Start all services
+
+### Using run-dev.sh (recommended)
+
+`run-dev.sh` builds the shared library, starts the coordinator, workers, protocol API, and frontend in parallel, and cleans up all processes on `Ctrl+C`:
+
+```bash
+./run-dev.sh
+```
+
+To run with a different number of workers:
+
+```bash
+WORKER_COUNT=2 ./run-dev.sh
+```
+
+### Starting services individually
+
+If you prefer separate terminals:
+
+```bash
+# Terminal 1 — coordinator
+cd coordinator-agent && npm install && npm run dev
+
+# Terminal 2
+cd worker-agent && npm run dev:worker1
+
+# Terminal 3
+cd worker-agent && npm run dev:worker2
+
+# Terminal 4
+cd worker-agent && npm run dev:worker3
+
+# Terminal 5 — frontend
+cd frontend && npm install && npm run dev
+```
+
+<Note>
+Use `npm run dev:worker1` (not `npm run dev`) for workers. The worker-specific scripts load the correct per-worker `.env` file via `DOTENV_CONFIG_PATH`.
+</Note>
+
+## Submit a test proposal
+
+Once all services are running, submit a test vote:
+
+```bash
+curl -X POST http://localhost:3000/api/coordinate/trigger \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "taskConfig": {
+      "type": "vote",
+      "parameters": {
+        "proposal": "Fund a developer grant program for 10,000 NEAR"
+      },
+      "timeout": 30000
+    }
+  }'
+```
+
+## Monitor the voting flow
+
+```bash
+# Coordinator status + latest tally
+curl http://localhost:3000/api/coordinate/status
+
+# Individual worker statuses
+curl http://localhost:3000/api/coordinate/workers
+
+# All proposals from the contract
+curl http://localhost:3000/api/coordinate/proposals
+```
+
+Or open the dashboard at `http://localhost:3004`.
+
+## Test jury selection
+
+```bash
+curl -X POST http://localhost:3000/api/coordinate/select-jury \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "pool": ["alice.near", "bob.near", "carol.near", "dave.near", "eve.near"],
+    "jurySize": 3
+  }'
+```
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Workers fail to start with 'Ensue API key not provided'">
+    Check that both `ENSUE_API_KEY` and `ENSUE_TOKEN` are set in each worker's env file. The client requires at least one of the two.
+  </Accordion>
+
+  <Accordion title="Coordinator never sees worker results">
+    Verify that all workers are using the same Ensue API key as the coordinator. If they use different accounts, workers write to a different memory namespace and the coordinator cannot read their results.
+  </Accordion>
+
+  <Accordion title="'NEAR_AI_API_KEY or NEAR_API_KEY is not set'">
+    Set `NEAR_API_KEY` in each worker's env file. The variable name is `NEAR_API_KEY` (not `NEAR_AI_API_KEY`), though both aliases are accepted.
+  </Accordion>
+
+  <Accordion title="Port already in use">
+    Another process is using the port. Stop it with `lsof -ti :3001 | xargs kill` (replace with the relevant port) or change the `PORT` in the env file.
+  </Accordion>
+
+  <Accordion title="Shared package not found (MODULE_NOT_FOUND)">
+    Run `cd shared && npm run build` before starting the agents. The agents import from `@near-shade-coordination/shared`, which must be compiled first.
+  </Accordion>
+
+  <Accordion title="Storacha vault errors on startup">
+    If you left `STORACHA_AGENT_PRIVATE_KEY` and `STORACHA_DELEGATION_PROOF` blank, the vault is disabled and uploads are skipped. No action needed. If you set them, verify the keys are correct with `storacha whoami`.
+  </Accordion>
+</AccordionGroup>

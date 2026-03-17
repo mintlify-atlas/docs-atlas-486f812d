@@ -1,0 +1,108 @@
+---
+title: "Trigger and reset"
+description: "Manually trigger a vote coordination or reset coordinator memory state"
+---
+
+## POST /api/coordinate/trigger
+
+Manually triggers a coordination round by dispatching a proposal to all worker agents. The coordination runs asynchronously in the background — this endpoint returns immediately.
+
+This is primarily used for local testing (`LOCAL_MODE=true`). In production, the coordinator automatically detects pending proposals from the NEAR contract via Ensue polling.
+
+```bash
+curl -X POST http://localhost:3000/api/coordinate/trigger \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "taskConfig": {
+      "type": "vote",
+      "parameters": {
+        "proposal": "Fund a developer grant program for 10,000 NEAR"
+      },
+      "timeout": 30000
+    }
+  }'
+```
+
+### Request body
+
+<ParamField body="taskConfig" type="TaskConfig" required>
+  Configuration for the coordination task
+
+  <Expandable title="TaskConfig fields">
+    <ParamField body="type" type="string" required>
+      Task type. Use `vote` for proposal voting.
+    </ParamField>
+    <ParamField body="parameters" type="object">
+      Task-specific parameters
+      <Expandable title="parameters fields">
+        <ParamField body="proposal" type="string">
+          The proposal text for AI agents to deliberate on
+        </ParamField>
+      </Expandable>
+    </ParamField>
+    <ParamField body="timeout" type="number">
+      Timeout in milliseconds. Defaults to `3000`.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+### Response fields
+
+<ResponseField name="message" type="string">
+  Always `Coordination triggered` on success
+</ResponseField>
+
+<ResponseField name="taskConfig" type="string">
+  The task config as a JSON string (normalized for Ensue storage)
+</ResponseField>
+
+<ResponseField name="timestamp" type="string">
+  ISO 8601 timestamp of when the trigger was received
+</ResponseField>
+
+### Example response
+
+```json
+{
+  "message": "Coordination triggered",
+  "taskConfig": "{\"type\":\"vote\",\"parameters\":{\"proposal\":\"Fund a developer grant program for 10,000 NEAR\"},\"timeout\":30000}",
+  "timestamp": "2025-01-15T10:00:00.000Z"
+}
+```
+
+<Tip>
+  Monitor the coordination progress with `GET /api/coordinate/status` and `GET /api/coordinate/workers` after triggering.
+</Tip>
+
+---
+
+## POST /api/coordinate/reset
+
+Resets all coordinator-related Ensue memory and sets all worker statuses back to `idle`. Use this to clear state between test runs.
+
+```bash
+curl -X POST http://localhost:3000/api/coordinate/reset
+```
+
+### Response fields
+
+<ResponseField name="message" type="string">
+  Always `Memory reset complete` on success
+</ResponseField>
+
+<ResponseField name="timestamp" type="string">
+  ISO 8601 timestamp
+</ResponseField>
+
+### Example response
+
+```json
+{
+  "message": "Memory reset complete",
+  "timestamp": "2025-01-15T10:00:00.000Z"
+}
+```
+
+<Warning>
+  Reset clears all in-flight coordination state from Ensue. Do not call this while a vote is in progress — it will cause the coordination to fail.
+</Warning>

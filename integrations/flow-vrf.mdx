@@ -1,0 +1,160 @@
+---
+title: 'Flow VRF'
+description: 'Verifiable random jury selection using Flow blockchain randomness — deterministic, auditable, and free from coordinator bias.'
+keywords: ['Flow', 'VRF', 'verifiable randomness', 'jury selection', 'Fisher-Yates', 'deliberation']
+---
+
+Delibera uses [Flow blockchain's](https://docs.flow.com) verifiable randomness beacon (VRF) to select juries from a candidate pool. Any party with the same seed can reproduce the exact selection — making jury composition verifiable and dispute-free.
+
+## Why verifiable randomness matters
+
+Without an independent randomness source, the coordinator could bias jury selection toward favorable voters. Flow's VRF eliminates this: the coordinator fetches a random seed from the Flow blockchain, applies a deterministic Fisher-Yates shuffle, and anyone can verify the result is consistent with that seed.
+
+## How it works
+
+<Steps>
+  <Step title="Fetch VRF seed from Flow">
+    The coordinator requests randomness from the Flow testnet. The seed is derived from the current block's randomness beacon — a public, tamper-evident value.
+  </Step>
+  <Step title="Apply Fisher-Yates shuffle">
+    The seed is used to deterministically shuffle the candidate pool using the Fisher-Yates algorithm. The first `jurySize` elements of the shuffled pool become the jury.
+  </Step>
+  <Step title="Return jury with VRF proof">
+    The response includes the selected jury, the VRF seed, and a `vrfProof` string in the format `flow-testnet:{seed}`. Anyone can verify the selection using the same seed and pool.
+  </Step>
+</Steps>
+
+## Select a jury
+
+### Request
+
+```bash
+curl -X POST http://localhost:3000/api/coordinate/select-jury \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "pool": ["alice.near", "bob.near", "carol.near", "dave.near", "eve.near"],
+    "jurySize": 3,
+    "deliberationId": "delib-42"
+  }'
+```
+
+### Response
+
+```json
+{
+  "jury": ["carol.near", "alice.near", "eve.near"],
+  "vrfSeed": "8f3a2c...",
+  "vrfProof": "flow-testnet:8f3a2c...",
+  "poolSize": 5,
+  "jurySize": 3,
+  "deliberationId": "delib-42",
+  "selectedAt": "2025-01-01T12:00:00.000Z"
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `jury` | Selected jury members in selection order |
+| `vrfSeed` | Raw VRF seed from Flow blockchain |
+| `vrfProof` | Auditable proof string (`flow-testnet:{seed}`) |
+| `poolSize` | Total number of candidates provided |
+| `jurySize` | Number of jurors selected |
+| `deliberationId` | The deliberation context ID (auto-generated if not supplied) |
+| `selectedAt` | ISO timestamp of selection |
+
+## Verify a jury selection
+
+To audit an existing selection, submit the original pool, jury size, and VRF seed. The coordinator re-runs the shuffle and returns the jury that the seed produces:
+
+### Request
+
+```bash
+curl -X POST http://localhost:3000/api/coordinate/verify-jury \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "pool": ["alice.near", "bob.near", "carol.near", "dave.near", "eve.near"],
+    "jurySize": 3,
+    "vrfSeed": "8f3a2c..."
+  }'
+```
+
+### Response
+
+```json
+{
+  "verifiedJury": ["carol.near", "alice.near", "eve.near"],
+  "matches": true
+}
+```
+
+`matches: true` confirms the stored jury is consistent with the VRF seed — no post-hoc manipulation is possible.
+
+## TypeScript API
+
+The jury selector is available directly if you need to embed it in coordinator logic:
+
+```typescript
+import { selectJury, verifyJurySelection } from './vrf/jury-selector';
+
+// Select a jury from a candidate pool
+const result = await selectJury(
+  ['alice.near', 'bob.near', 'carol.near', 'dave.near', 'eve.near'], // pool
+  3,           // jurySize
+  'delib-42',  // deliberationId (optional)
+);
+// result.jury        → string[]
+// result.vrfSeed     → string
+// result.vrfProof    → 'flow-testnet:...'
+// result.poolSize    → 5
+// result.jurySize    → 3
+// result.selectedAt  → ISO string
+
+// Verify determinism offline (no network call)
+const jury = verifyJurySelection(
+  ['alice.near', 'bob.near', 'carol.near', 'dave.near', 'eve.near'],
+  3,
+  result.vrfSeed,
+);
+// Returns the same jury — pure function, no Flow API call needed
+```
+
+### `selectJury` parameters
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `candidatePool` | `string[]` | Yes | Array of NEAR account IDs or worker IDs to select from |
+| `jurySize` | `number` | Yes | Number of jurors to select |
+| `deliberationId` | `string` | No | Context ID for the deliberation (auto-generated if omitted) |
+
+### `verifyJurySelection` parameters
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `candidatePool` | `string[]` | Yes | Original pool (must be in the same order) |
+| `jurySize` | `number` | Yes | Original jury size |
+| `vrfSeed` | `string` | Yes | VRF seed from the original selection |
+
+## VRF proof format
+
+The `vrfProof` field uses the format `{network}:{seed}`, for example:
+
+```
+flow-testnet:8f3a2c1e4b7d9a2f...
+```
+
+This encodes both the network the randomness was sourced from and the seed itself. The network prefix makes cross-network audit possible if Delibera is deployed on Flow mainnet in the future.
+
+<Tip>
+Store the `vrfProof` alongside any jury-based deliberation record. It is the only value needed for independent verification — the pool and jury size are usually public context.
+</Tip>
+
+## Determinism guarantee
+
+Given the same `pool` (same elements, same order), the same `jurySize`, and the same `vrfSeed`, `verifyJurySelection` always returns the same jury. This is guaranteed by the Fisher-Yates shuffle implementation, which is a pure function over the seed.
+
+```typescript
+// These two calls always return the same result
+const j1 = verifyJurySelection(pool, 3, seed);
+const j2 = verifyJurySelection(pool, 3, seed);
+console.log(JSON.stringify(j1) === JSON.stringify(j2)); // true
+```

@@ -1,80 +1,278 @@
 ---
 title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+description: "Get Delibera running locally in under 15 minutes — coordinator, three voter agents, and the frontend dashboard."
 ---
 
-## Get started in three steps
+<Info>
+  This guide sets up a fully local development environment using `LOCAL_MODE=true`. No Phala TEE or NEAR on-chain transactions are required to try out the voting flow.
+</Info>
 
-Get your documentation site running locally and make your first customization.
+<Steps>
+  <Step title="Install prerequisites">
+    Make sure the following tools are installed before you begin.
 
-### Step 1: Set up your local environment
+    **Node.js 22+**
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+    ```bash
+    node --version   # must be v22.0.0 or higher
+    ```
 
-### Step 2: Deploy your changes
+    **Rust and the WebAssembly target** (required to build NEAR smart contracts):
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+    ```bash
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+    rustup target add wasm32-unknown-unknown
+    ```
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+    **NEAR CLI** (for contract interaction and account management):
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+    ```bash
+    npm install -g near-cli-rs
+    ```
 
-### Step 3: Go live
+    See the [Prerequisites](/prerequisites) page for platform-specific instructions and API key setup.
+  </Step>
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+  <Step title="Clone the repository and install dependencies">
+    ```bash
+    git clone https://github.com/your-org/near-shade-coordination.git
+    cd near-shade-coordination
+    ```
 
-## Next steps
+    Install dependencies for all packages:
 
-Now that you have your docs running, explore these key features:
+    ```bash
+    npm install --prefix coordinator-agent
+    npm install --prefix worker-agent
+    npm install --prefix frontend
+    ```
 
-<CardGroup cols={2}>
+    <Tip>
+      The `run-dev.sh` script handles dependency installation automatically on first run, but installing upfront avoids output noise in the combined log.
+    </Tip>
+  </Step>
 
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
+  <Step title="Build the shared library">
+    The `shared` package provides typed Ensue key constructors and TypeScript interfaces used by both the coordinator and worker agents. Build it before starting any services.
 
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
+    ```bash
+    cd shared && npm install && npm run build
+    cd ..
+    ```
 
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
+    You should see `dist/` appear in `shared/`. If you modify any types in `shared/src/`, re-run this step.
+  </Step>
 
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
+  <Step title="Generate Storacha identities">
+    Each agent requires a sovereign `did:key` identity for encrypted storage. You need one identity for the coordinator and one for each worker agent.
 
-</CardGroup>
+    **Install the Storacha CLI:**
 
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>
+    ```bash
+    npm install -g @storacha/cli
+    ```
+
+    **One-time account setup:**
+
+    ```bash
+    # Log in (email confirmation required)
+    storacha login you@example.com
+
+    # Create a storage space
+    storacha space create delibera-v2
+    storacha space provision --provider did:web:storacha.network
+    ```
+
+    **Generate a key per agent** (run once for the coordinator, once for each worker):
+
+    ```bash
+    storacha key create
+    # → Private key: MgCZG7...  → set as STORACHA_AGENT_PRIVATE_KEY
+    # → Agent DID:   did:key:z6Mk...
+    ```
+
+    **Create a delegation for each agent DID:**
+
+    ```bash
+    storacha delegation create <AGENT_DID> \
+      --can 'space/blob/add' --can 'space/index/add' \
+      --can 'upload/add' --can 'upload/list' \
+      --can 'space/content/decrypt' \
+      -o delegation.car
+
+    # Base64-encode the delegation file
+    base64 delegation.car
+    # → set the output as STORACHA_DELEGATION_PROOF
+    ```
+
+    <Note>
+      Storacha is optional for a first run. If you omit `STORACHA_AGENT_PRIVATE_KEY`, the coordinator starts in degraded mode and skips encrypted archival — all voting still works.
+    </Note>
+  </Step>
+
+  <Step title="Configure environment files">
+    Copy the example file and fill in your credentials.
+
+    ```bash
+    cp .env.example .env
+    ```
+
+    **Coordinator agent** — create `coordinator-agent/.env.development.local`:
+
+    ```bash
+    PORT=3000
+    LOCAL_MODE=true
+
+    ENSUE_API_KEY=your-ensue-api-key
+    ENSUE_TOKEN=your-ensue-api-key
+
+    NEAR_NETWORK=testnet
+    NEAR_ACCOUNT_ID=agents-coordinator.testnet
+    NEAR_SEED_PHRASE="your twelve word seed phrase here"
+    NEXT_PUBLIC_contractId=coordinator.agents-coordinator.testnet
+    NEAR_API_KEY=your-near-ai-api-key
+
+    WORKERS=worker1:3001,worker2:3002,worker3:3003
+
+    # Storacha (encrypted persistence — optional for local dev)
+    STORACHA_AGENT_PRIVATE_KEY=MgCZG7...
+    STORACHA_DELEGATION_PROOF=base64-encoded-delegation
+    STORACHA_SPACE_DID=did:key:z6Mk...
+
+    # Lit Protocol (threshold encryption)
+    LIT_NETWORK=datil
+    ```
+
+    **Worker agents** — create one file per worker:
+    - `worker-agent/.env.worker1.local`
+    - `worker-agent/.env.worker2.local`
+    - `worker-agent/.env.worker3.local`
+
+    ```bash
+    # worker-agent/.env.worker1.local
+    WORKER_ID=worker1
+    PORT=3001
+    ENSUE_API_KEY=your-ensue-api-key
+    ENSUE_TOKEN=your-ensue-api-key
+    NEAR_API_KEY=your-near-ai-api-key
+    NEXT_PUBLIC_contractId=coordinator.agents-coordinator.testnet
+
+    # Storacha (unique per worker — generate a separate key for each)
+    STORACHA_AGENT_PRIVATE_KEY=MgCZG7...
+    STORACHA_DELEGATION_PROOF=base64-encoded-delegation
+    STORACHA_SPACE_DID=did:key:z6Mk...
+    ```
+
+    **Frontend** — create `frontend/.env.local`:
+
+    ```bash
+    NEXT_PUBLIC_COORDINATOR_URL=http://localhost:3000
+    NEXT_PUBLIC_NEAR_NETWORK=testnet
+    NEXT_PUBLIC_contractId=coordinator.agents-coordinator.testnet
+    NEXT_PUBLIC_REGISTRY_CONTRACT_ID=registry.agents-coordinator.testnet
+    ```
+
+    See [Configuration](/configuration) for a full description of every environment variable.
+  </Step>
+
+  <Step title="Start all services">
+    The `run-dev.sh` script starts the coordinator, three workers, the protocol API, and the frontend in parallel — each in the background with a shared cleanup trap on `Ctrl+C`.
+
+    ```bash
+    ./run-dev.sh
+    ```
+
+    You should see output like:
+
+    ```
+    Building shared package...
+    Starting coordinator on :3000...
+    Starting worker1 on :3001...
+    Starting worker2 on :3002...
+    Starting worker3 on :3003...
+    Starting protocol-api on :3005...
+    Starting frontend on :3004...
+
+    All services starting (WORKER_COUNT=3):
+      Coordinator:  http://localhost:3000
+      Worker 1:     http://localhost:3001
+      Worker 2:     http://localhost:3002
+      Worker 3:     http://localhost:3003
+      Protocol API: http://localhost:3005
+      Frontend:     http://localhost:3004
+
+    Press Ctrl+C to stop all services.
+    ```
+
+    You can also start a subset of services by setting `WORKER_COUNT`:
+
+    ```bash
+    WORKER_COUNT=1 ./run-dev.sh
+    ```
+
+    <Tip>
+      To start services individually (useful for debugging a single agent), run each in its own terminal:
+
+      ```bash
+      # Terminal 1 — Coordinator
+      cd coordinator-agent && npm run dev
+
+      # Terminal 2 — Worker 1
+      cd worker-agent && npm run dev:worker1
+
+      # Terminal 3 — Worker 2
+      cd worker-agent && npm run dev:worker2
+
+      # Terminal 4 — Worker 3
+      cd worker-agent && npm run dev:worker3
+
+      # Terminal 5 — Frontend
+      cd frontend && npm run dev
+      ```
+    </Tip>
+  </Step>
+
+  <Step title="Submit your first proposal">
+    With all services running, trigger a vote by posting a proposal to the coordinator:
+
+    ```bash
+    curl -X POST http://localhost:3000/api/coordinate/trigger \
+      -H 'Content-Type: application/json' \
+      -d '{"taskConfig":{"type":"vote","parameters":{"proposal":"Fund a developer grant program for 10,000 NEAR"},"timeout":30000}}'
+    ```
+
+    The coordinator responds immediately (the vote runs in the background):
+
+    ```json
+    {
+      "message": "Coordination triggered",
+      "taskConfig": "{\"type\":\"vote\",\"parameters\":{\"proposal\":\"Fund a developer grant program for 10,000 NEAR\"},\"timeout\":30000}",
+      "timestamp": "2026-03-17T10:00:00.000Z"
+    }
+    ```
+
+    **Monitor the vote in real time:**
+
+    ```bash
+    # Check coordinator status and latest tally
+    curl http://localhost:3000/api/coordinate/status
+
+    # Check individual worker statuses
+    curl http://localhost:3000/api/coordinate/workers
+    ```
+
+    **Try jury selection with Flow VRF:**
+
+    ```bash
+    curl -X POST http://localhost:3000/api/coordinate/select-jury \
+      -H 'Content-Type: application/json' \
+      -d '{"pool":["alice.near","bob.near","carol.near","dave.near","eve.near"],"jurySize":3}'
+    ```
+
+    Or open the frontend dashboard at **[http://localhost:3004](http://localhost:3004)** for a live view of the voting flow.
+
+    <Warning>
+      If workers show `offline` status immediately after starting, wait 10–15 seconds for all processes to fully initialize before triggering a vote.
+    </Warning>
+  </Step>
+</Steps>

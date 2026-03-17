@@ -1,0 +1,251 @@
+---
+title: "Registry contract methods"
+description: "Full reference for all Registry Contract methods on NEAR testnet"
+---
+
+**Contract address:** `registry.agents-coordinator.testnet`
+
+The Registry Contract is a platform-wide directory of coordinator and worker agents. It stores their DID identities, HTTP endpoint URLs, and CVM (Confidential VM) IDs for Phala TEE deployments.
+
+<Note>
+  All registration calls require a minimum deposit of **0.1 NEAR**. This prevents spam and covers on-chain storage costs. The deposit is non-refundable.
+</Note>
+
+## Change methods
+
+### `register_coordinator`
+
+Registers or updates a coordinator agent. Requires 0.1 NEAR deposit. Supports upsert — re-registering the same `coordinator_did` updates the existing record (only the original registrant or admin can update).
+
+```bash
+near call registry.agents-coordinator.testnet register_coordinator \
+  '{
+    "coordinator_did": "did:key:z6MkCoord123",
+    "endpoint_url": "https://my-coordinator.example.com",
+    "cvm_id": "cvm-prod-001",
+    "min_workers": 1,
+    "max_workers": 5
+  }' \
+  --accountId your-account.testnet \
+  --deposit 0.1
+```
+
+<ParamField path="coordinator_did" type="string" required>
+  The coordinator's DID. Must start with `did:` (e.g., `did:key:z6Mk...`).
+</ParamField>
+
+<ParamField path="endpoint_url" type="string" required>
+  The coordinator agent's HTTP endpoint URL (used by workers for discovery)
+</ParamField>
+
+<ParamField path="cvm_id" type="string" required>
+  The Phala CVM (Confidential VM) ID for TEE production deployments. Use empty string for local dev.
+</ParamField>
+
+<ParamField path="min_workers" type="u8" required>
+  Minimum number of workers this coordinator requires. Must be ≤ `max_workers`.
+</ParamField>
+
+<ParamField path="max_workers" type="u8" required>
+  Maximum number of workers this coordinator supports. Must be > 0.
+</ParamField>
+
+**Returns:** `CoordinatorRecord` — the registered record
+
+---
+
+### `register_worker`
+
+Registers or updates a worker agent under a coordinator. Requires 0.1 NEAR deposit. The referenced `coordinator_did` must exist and be active.
+
+```bash
+near call registry.agents-coordinator.testnet register_worker \
+  '{
+    "coordinator_did": "did:key:z6MkCoord123",
+    "worker_did": "did:key:z6MkWorker456",
+    "endpoint_url": "https://my-worker.example.com",
+    "cvm_id": "cvm-worker-001"
+  }' \
+  --accountId your-account.testnet \
+  --deposit 0.1
+```
+
+<ParamField path="coordinator_did" type="string" required>
+  The DID of the coordinator this worker belongs to. Must be active.
+</ParamField>
+
+<ParamField path="worker_did" type="string" required>
+  The worker's DID. Must start with `did:`.
+</ParamField>
+
+<ParamField path="endpoint_url" type="string" required>
+  The worker agent's HTTP endpoint URL
+</ParamField>
+
+<ParamField path="cvm_id" type="string" required>
+  The Phala CVM ID for TEE production deployments. Use empty string for local dev.
+</ParamField>
+
+**Returns:** `WorkerRecord` — the registered record
+
+---
+
+### `update_worker_endpoint`
+
+Updates a worker's HTTP endpoint URL. Only the original registrant account or admin can call this.
+
+```bash
+near call registry.agents-coordinator.testnet update_worker_endpoint \
+  '{"worker_did": "did:key:z6MkWorker456", "endpoint_url": "https://new-endpoint.example.com"}' \
+  --accountId your-account.testnet
+```
+
+---
+
+### `deactivate_worker`
+
+Deactivates a worker. The worker record is preserved but it will no longer appear in active worker queries.
+
+```bash
+near call registry.agents-coordinator.testnet deactivate_worker \
+  '{"worker_did": "did:key:z6MkWorker456"}' \
+  --accountId your-account.testnet
+```
+
+---
+
+### `deactivate_coordinator`
+
+Deactivates a coordinator. Workers associated with this coordinator cannot register new workers until it is reactivated.
+
+```bash
+near call registry.agents-coordinator.testnet deactivate_coordinator \
+  '{"coordinator_did": "did:key:z6MkCoord123"}' \
+  --accountId your-account.testnet
+```
+
+---
+
+## View methods
+
+### `list_active_coordinators`
+
+Returns all active coordinator records.
+
+```bash
+near view registry.agents-coordinator.testnet list_active_coordinators '{}'
+```
+
+**Returns:** `CoordinatorRecord[]`
+
+---
+
+### `list_active_workers`
+
+Returns all active worker records across all coordinators.
+
+```bash
+near view registry.agents-coordinator.testnet list_active_workers '{}'
+```
+
+**Returns:** `WorkerRecord[]`
+
+---
+
+### `get_workers_for_coordinator`
+
+Returns all active workers registered under a specific coordinator.
+
+```bash
+near view registry.agents-coordinator.testnet get_workers_for_coordinator \
+  '{"coordinator_did": "did:key:z6MkCoord123"}'
+```
+
+**Returns:** `WorkerRecord[]` — only active workers for the specified coordinator
+
+---
+
+### `get_coordinator_by_did`
+
+Looks up a single coordinator by DID.
+
+```bash
+near view registry.agents-coordinator.testnet get_coordinator_by_did \
+  '{"coordinator_did": "did:key:z6MkCoord123"}'
+```
+
+**Returns:** `CoordinatorRecord | null`
+
+---
+
+### `get_worker_by_did`
+
+Looks up a single worker by DID.
+
+```bash
+near view registry.agents-coordinator.testnet get_worker_by_did \
+  '{"worker_did": "did:key:z6MkWorker456"}'
+```
+
+**Returns:** `WorkerRecord | null`
+
+---
+
+### `get_stats`
+
+Returns aggregate registry statistics.
+
+```bash
+near view registry.agents-coordinator.testnet get_stats '{}'
+```
+
+**Returns:**
+```json
+{
+  "total_coordinators": 3,
+  "active_coordinators": 2,
+  "total_workers": 9,
+  "active_workers": 7
+}
+```
+
+---
+
+### `get_min_deposit`
+
+Returns the current minimum registration deposit in yoctoNEAR.
+
+```bash
+near view registry.agents-coordinator.testnet get_min_deposit '{}'
+```
+
+**Returns:** `string` — yoctoNEAR amount (e.g., `"100000000000000000000000"` = 0.1 NEAR)
+
+---
+
+## Data structures
+
+### CoordinatorRecord
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `account_id` | `AccountId` | NEAR account that registered the coordinator |
+| `coordinator_did` | `string` | The coordinator's DID |
+| `endpoint_url` | `string` | HTTP endpoint for coordinator API |
+| `cvm_id` | `string` | Phala CVM ID (empty string for local dev) |
+| `min_workers` | `u8` | Minimum workers this coordinator requires |
+| `max_workers` | `u8` | Maximum workers this coordinator supports |
+| `registered_at` | `u64` | NEAR block timestamp of registration |
+| `is_active` | `boolean` | Whether this coordinator is active |
+
+### WorkerRecord
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `account_id` | `AccountId` | NEAR account that registered the worker |
+| `coordinator_did` | `string` | DID of the coordinator this worker belongs to |
+| `worker_did` | `string` | The worker's DID |
+| `endpoint_url` | `string` | HTTP endpoint for worker API |
+| `cvm_id` | `string` | Phala CVM ID (empty string for local dev) |
+| `registered_at` | `u64` | NEAR block timestamp of registration |
+| `is_active` | `boolean` | Whether this worker is active |

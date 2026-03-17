@@ -1,0 +1,204 @@
+---
+title: 'Production deployment with Phala TEE'
+description: 'Deploy coordinator and worker agents as Shade Agents inside Phala Confidential Virtual Machines for hardware-enforced privacy.'
+keywords: ['production', 'Phala', 'TEE', 'Docker', 'Shade Agent', 'CVM', 'deployment']
+---
+
+Production deployments run each agent inside a [Phala Network](https://phala.network/) Confidential Virtual Machine (CVM). The TEE guarantees that agent code and keys cannot be observed or tampered with, even by the infrastructure operator.
+
+## Architecture overview
+
+```
+Phala CVM (coordinator)
+  └── coordinator-agent container
+        ├── Shade Agent v2 init → derives NEAR key from hardware
+        ├── Registers key on coordinator contract
+        └── Polls Ensue, tallies votes, resumes contract
+
+Phala CVM (worker 1)
+  └── worker-agent container
+        ├── Shade Agent v2 init → derives NEAR key from hardware
+        ├── Calls NEAR AI for deliberation
+        └── Writes vote + proof to Ensue
+
+(repeat for worker 2, worker 3, ...)
+```
+
+## Build Docker images
+
+Both Dockerfiles use a multi-stage build: compile TypeScript in the builder stage, then copy only the `dist/` output into the runtime image.
+
+### Coordinator
+
+```bash
+# Build from the repo root (Dockerfile uses relative COPY paths)
+docker build \
+  -f coordinator-agent/Dockerfile \
+  -t yourusername/coordinator-agent:latest \
+  .
+```
+
+Coordinator `Dockerfile` summary:
+
+```dockerfile
+FROM node:22-alpine AS builder
+WORKDIR /app
+# Build shared library
+COPY shared/ ./shared/
+RUN cd shared && npm install && npm run build
+# Build coordinator
+COPY coordinator-agent/ ./coordinator-agent/
+RUN cd coordinator-agent && npm install && npm run build
+
+FROM node:22-alpine
+WORKDIR /app/coordinator-agent
+COPY --from=builder /app/shared ./shared
+COPY --from=builder /app/coordinator-agent ./coordinator-agent
+ENV PORT=3000
+EXPOSE 3000
+CMD ["node", "dist/index.js"]
+```
+
+### Worker agent
+
+```bash
+docker build \
+  -f worker-agent/Dockerfile \
+  -t yourusername/worker-agent:latest \
+  .
+```
+
+Worker `Dockerfile` uses `node:20-slim` and exposes port 3001 by default. Pass `PORT` at runtime to run workers on different ports.
+
+## Push images to a registry
+
+```bash
+docker push yourusername/coordinator-agent:latest
+docker push yourusername/worker-agent:latest
+```
+
+The image digest (sha256) of the pushed image becomes the `APP_CODEHASH` you register on-chain.
+
+## Register the codehash
+
+Before agents can operate in TEE mode, approve the image codehash on the coordinator contract:
+
+```bash
+near call coordinator.agents-coordinator.testnet approve_codehash \
+  '{"codehash": "<sha256-of-your-image>"}' \
+  --accountId agents-coordinator.testnet \
+  --networkId testnet
+```
+
+Only the contract owner can approve codehashes. An unapproved codehash results in the contract rejecting the agent's function calls.
+
+## Configure production environment
+
+Create a `.env` file (or use the `environment:` block in `docker-compose.yaml`) with these values:
+
+```bash
+PORT=3000
+LOCAL_MODE=false
+NEAR_NETWORK=testnet
+NEXT_PUBLIC_contractId=coordinator.agents-coordinator.testnet
+POLL_INTERVAL=5000
+
+# Shade Agent v2 (required in production)
+AGENT_CONTRACT_ID=coordinator.agents-coordinator.testnet
+SPONSOR_ACCOUNT_ID=agents-coordinator.testnet
+SPONSOR_PRIVATE_KEY=ed25519:your-sponsor-private-key
+
+# Ensue
+ENSUE_API_KEY=your-ensue-api-key
+ENSUE_TOKEN=your-ensue-api-key
+
+# NEAR AI
+NEAR_API_KEY=your-near-ai-api-key
+
+# Storacha (optional)
+STORACHA_AGENT_PRIVATE_KEY=MgCZG7...
+STORACHA_DELEGATION_PROOF=base64-car...
+STORACHA_SPACE_DID=did:key:z6Mk...
+
+# Lit Protocol (optional)
+LIT_NETWORK=datil
+
+# Phala Cloud
+PHALA_API_KEY=your-phala-api-key
+```
+
+## Deploy with docker-compose
+
+The coordinator includes a `docker-compose.yaml` preconfigured for Phala:
+
+```yaml
+services:
+  coordinator-agent:
+    image: ${DOCKER_TAG}
+    container_name: coordinator-agent
+    platform: linux/amd64
+    restart: always
+    ports:
+      - "3000:3000"
+    volumes:
+      - /var/run/dstack.sock:/var/run/dstack.sock
+    environment:
+      PORT: ${PORT}
+      LOCAL_MODE: "false"
+      AGENT_CONTRACT_ID: ${AGENT_CONTRACT_ID}
+      SPONSOR_ACCOUNT_ID: ${SPONSOR_ACCOUNT_ID}
+      SPONSOR_PRIVATE_KEY: ${SPONSOR_PRIVATE_KEY}
+      NEAR_NETWORK: ${NEAR_NETWORK}
+      ENSUE_API_KEY: ${ENSUE_API_KEY}
+      ENSUE_TOKEN: ${ENSUE_TOKEN}
+      NEXT_PUBLIC_contractId: ${NEXT_PUBLIC_contractId}
+```
+
+The `/var/run/dstack.sock` volume mount is required — it gives the container access to the Phala TEE attestation interface.
+
+## Shade Agent initialization flow
+
+On first boot inside a Phala CVM with `LOCAL_MODE=false`:
+
+<Steps>
+  <Step title="Derive NEAR keypair">
+    Shade Agent v2 uses the CVM's hardware entropy to derive a fresh Ed25519 keypair. This key is unique to this CVM instance and is never exposed outside the TEE.
+  </Step>
+  <Step title="Register with sponsor account">
+    The agent calls the NEAR network to add the derived public key as a function-call access key, using the sponsor account to pay for storage.
+  </Step>
+  <Step title="Begin normal operation">
+    With a registered NEAR key, the coordinator can submit tallies and the worker can record nullifiers. All calls are signed by the hardware-derived key.
+  </Step>
+  <Step title="Register CVM ID in registry">
+    The agent's CVM ID is written to the registry contract and mirrored to Ensue for runtime lookup.
+  </Step>
+</Steps>
+
+## Worker image variants
+
+Each worker instance should be built from the same image but deployed as a separate CVM with its own Storacha identity. Set the worker-specific variables at runtime:
+
+```bash
+WORKER_ID=worker1
+PORT=3001
+STORACHA_AGENT_PRIVATE_KEY=MgCZG7-worker1...  # unique per worker
+STORACHA_DELEGATION_PROOF=base64-car-worker1...
+```
+
+<Warning>
+Never share `STORACHA_AGENT_PRIVATE_KEY` across workers. Each worker must have its own `did:key` identity to maintain sovereign storage attestation.
+</Warning>
+
+## Verify deployment
+
+After startup, check the agent is registered and responding:
+
+```bash
+# Health check
+curl https://your-coordinator-url/
+
+# Confirm the agent is registered
+near view registry.agents-coordinator.testnet list_active_coordinators \
+  --networkId testnet
+```

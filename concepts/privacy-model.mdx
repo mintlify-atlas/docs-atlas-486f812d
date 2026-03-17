@@ -1,0 +1,150 @@
+---
+title: "Privacy model"
+description: "How Delibera partitions data across public and private layers — and why individual AI votes never touch the blockchain."
+---
+
+<Note>
+  Individual AI votes and reasoning never appear on the blockchain. Only aggregate tallies are settled on-chain.
+</Note>
+
+Delibera is built around a strict privacy boundary: the NEAR blockchain is a public ledger, so anything written there is visible to everyone. Individual AI deliberation — the votes, the reasoning, the verification proofs — must stay off-chain. This page explains exactly where each piece of data lives and how that separation is enforced.
+
+## Data privacy table
+
+The table below covers every data type in the system and its visibility.
+
+| Data | Location | Visibility |
+|------|----------|------------|
+| Proposal text | NEAR blockchain | Public |
+| DAO manifesto | NEAR blockchain | Public |
+| Aggregate tally (N Approved, M Rejected) | NEAR blockchain | Public |
+| Final decision (Approved / Rejected) | NEAR blockchain | Public |
+| Worker submission hashes (nullifier) | NEAR blockchain | Public |
+| Individual AI votes | Ensue shared memory | Private |
+| AI reasoning / deliberation | Ensue shared memory | Private |
+| NEAR AI verification proofs | Ensue shared memory | Private |
+| Encrypted transcripts | Storacha (Lit-encrypted) | Private (threshold decryption) |
+| Filecoin archival records | Storacha + Filecoin | Private (encrypted at rest) |
+| FHE-encrypted ballots (V2) | Zama fhEVM chain | Encrypted (FHE) |
+
+## What goes on-chain
+
+The NEAR coordinator contract stores only the minimum data needed for verifiable public settlement:
+
+- **Proposal text** — the question being decided, submitted by the DAO member
+- **DAO manifesto** — the rules and values all AI agents vote against
+- **Aggregate tally** — the final count of Approved and Rejected votes
+- **Final decision** — `Approved` or `Rejected`
+- **Worker submission hashes** — cryptographic nullifiers (see below)
+
+Nothing about which agent voted which way, and nothing about the reasoning behind any vote, reaches the blockchain.
+
+## The nullifier pattern
+
+When a worker agent completes its vote, the coordinator records a *nullifier* on-chain: a SHA-256 hash of the worker's raw result payload.
+
+```typescript
+// coordinator-agent/src/monitor/memory-monitor.ts
+const result_hash = crypto
+  .createHash('sha256')
+  .update(resultStr)          // JSON-serialized WorkerResult
+  .digest('hex');
+
+// Only worker_id + result_hash go on-chain — no vote, no reasoning
+submissions.push({ worker_id, result_hash });
+```
+
+This `result_hash` proves the worker participated and committed to a result at a specific moment in time, without revealing what that result was. The actual vote and reasoning stay in Ensue shared memory.
+
+<Tip>
+  Nullifiers also prevent double-submission: the contract rejects any attempt to record a second submission from the same worker on the same proposal.
+</Tip>
+
+## OnChainResult vs TallyResult
+
+The codebase maintains two distinct result types. Understanding the difference is key to understanding the privacy model.
+
+<Tabs>
+  <Tab title="OnChainResult">
+    `OnChainResult` is what gets serialized and sent to the NEAR contract via `resume_with_result`. It contains only the aggregate numbers — no worker identities, no reasoning.
+
+    ```typescript
+    // shared/src/types.ts
+    export interface OnChainResult {
+      aggregatedValue: number;   // number of approvals
+      approved: number;
+      rejected: number;
+      decision: VoteDecision;    // 'Approved' | 'Rejected'
+      workerCount: number;
+      timestamp: string;
+      proposalId: number;
+    }
+    ```
+
+    This type intentionally omits the `workers` array. There is no field for individual votes or reasoning.
+  </Tab>
+  <Tab title="TallyResult">
+    `TallyResult` is the full in-memory result used by the coordinator before settlement. It contains per-worker detail and stays in Ensue only.
+
+    ```typescript
+    // shared/src/types.ts
+    export interface TallyResult {
+      aggregatedValue: number;
+      approved: number;
+      rejected: number;
+      decision: VoteDecision;
+      workerCount: number;
+      workers: WorkerResult[];              // full per-worker results
+      timestamp: string;
+      proposalId?: number;
+      workerNames?: Record<string, string>; // DID → display name
+    }
+    ```
+
+    `TallyResult` includes the full `workers` array (with each agent's vote and reasoning). This object is written to `coordination/coordinator/tally` in Ensue and archived to `coordination/proposals/{id}/tally` — never serialized to the chain.
+  </Tab>
+</Tabs>
+
+When the coordinator settles a proposal, it explicitly strips the worker detail before calling the contract:
+
+```typescript
+// coordinator-agent/src/monitor/memory-monitor.ts
+// Privacy: only send aggregate on-chain, NOT individual worker reasoning
+const onChainResult = JSON.stringify({
+  aggregatedValue: tally.aggregatedValue,
+  approved:        tally.approved,
+  rejected:        tally.rejected,
+  decision:        tally.decision,
+  workerCount:     tally.workerCount,
+  timestamp:       tally.timestamp,
+  proposalId,
+  // tally.workers intentionally excluded
+});
+```
+
+## Threshold decryption via Lit Protocol
+
+After a vote concludes, the coordinator encrypts the full `TallyResult` (including per-worker reasoning) and uploads it to Storacha. The encryption uses Lit Protocol's threshold key system.
+
+Rather than a single private key, Lit distributes key shares across its node network. Decryption requires collecting a threshold of shares — no single node or operator can decrypt alone.
+
+Access control is enforced by an Access Control Condition (ACC) attached to the ciphertext. You configure the ACC to allow decryption only by wallets that hold a governance token, wallets that signed a UCAN delegation, or any other on-chain condition Lit supports.
+
+```typescript
+// coordinator-agent/src/storacha/vault.ts
+const encryptionConfig = {
+  issuer:    storachaClient.agent,   // the coordinator's did:key
+  spaceDID:  currentSpace.did(),
+  proofs:    storachaClient.proofs(),
+  fileMetadata: { name: `deliberation-${proposalId}.json` },
+};
+
+// Encrypts with Lit threshold keys, then uploads to Storacha
+const cid = await encryptedClient.encryptAndUploadFile(blob, encryptionConfig);
+```
+
+The returned CID is a permanent content-addressed reference to the encrypted transcript. Anyone with the CID can verify the transcript exists on Filecoin, but only wallets that satisfy the ACC can decrypt it.
+
+<Info>
+  Verification proofs from NEAR AI — which cryptographically link each vote to a specific model running in a TEE — are also stored in Ensue only. They never appear on-chain. See [TEE attestation and AI verification](/concepts/tee-attestation) for details.
+</Info>

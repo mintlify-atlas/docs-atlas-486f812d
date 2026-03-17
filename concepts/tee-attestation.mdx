@@ -1,0 +1,168 @@
+---
+title: "TEE attestation and AI verification"
+description: "How Delibera uses Phala Network TEEs and NEAR AI verification proofs to cryptographically prove which AI model voted — without exposing what it voted."
+---
+
+Delibera combines two trust mechanisms to make AI voting verifiable: **Trusted Execution Environments** (TEEs) provide hardware-level isolation for the agents themselves, and **NEAR AI verification proofs** cryptographically link each vote to a specific model running inside verified TEE hardware.
+
+## What is a TEE?
+
+A Trusted Execution Environment is a hardware-isolated region of a processor where code runs in a protected enclave. The operating system, hypervisor, and cloud provider cannot read or tamper with the memory or execution of code inside a TEE.
+
+In production, Delibera agents run inside [Phala Network](https://phala.network/) Confidential VM (CVM) containers. Phala provisions TEE hardware — specifically Intel TDX processors and NVIDIA Confidential Computing GPUs — and issues cryptographic attestation reports that prove:
+
+- The specific code image (binary hash) running in the enclave
+- The hardware platform the enclave is running on
+- That the hardware is genuine and unmodified
+
+This means you can verify that the coordinator and worker agents are running the expected code, on genuine TEE hardware, and that no operator (including Phala) can read the agents' private keys or reasoning.
+
+<Info>
+  In local development (`LOCAL_MODE=true`), agents run outside a TEE. TEE attestation is a production-only guarantee.
+</Info>
+
+## NEAR AI verification proofs
+
+Every time a worker agent calls NEAR AI to deliberate on a proposal, NEAR AI returns a **verification proof** alongside the model's response.
+
+The proof is fetched from the NEAR AI signature endpoint after the chat completion:
+
+```typescript
+// worker-agent/src/workers/ai-voter.ts
+const url = `https://cloud-api.near.ai/v1/signature/${
+  encodeURIComponent(chatId)
+}?model=${encodeURIComponent(model)}&signing_algo=ecdsa`;
+
+const sig = await fetch(url, {
+  headers: { Authorization: `Bearer ${apiKey}` },
+}).then(r => r.json());
+
+// sig.text is "request_hash:response_hash"
+const [requestHash, responseHash] = sig.text.split(':');
+```
+
+### VerificationProof interface
+
+The `VerificationProof` type captures all fields returned by the NEAR AI signature API:
+
+```typescript
+// shared/src/types.ts
+export interface VerificationProof {
+  chat_id:         string;  // unique ID for the chat completion
+  model:           string;  // e.g. 'deepseek-ai/DeepSeek-V3.1'
+  request_hash:    string;  // SHA-256 hash of the prompt sent to the model
+  response_hash:   string;  // SHA-256 hash of the model's response
+  signature:       string;  // ECDSA signature over "request_hash:response_hash"
+  signing_address: string;  // TEE public key (unique per model)
+  signing_algo:    string;  // 'ecdsa'
+  timestamp:       number;  // Unix ms timestamp of the proof
+  attestation?:    ModelAttestation; // links signing_address to TEE hardware
+}
+```
+
+You can independently verify the proof with any ECDSA library:
+
+```typescript
+import { ethers } from 'ethers';
+
+const text    = `${proof.request_hash}:${proof.response_hash}`;
+const signer  = ethers.verifyMessage(text, proof.signature);
+const isValid = signer.toLowerCase() === proof.signing_address.toLowerCase();
+```
+
+A valid proof means: *the model identified by `signing_address` processed a request whose content hashes to `request_hash` and produced a response whose content hashes to `response_hash`*. The proof does not reveal the content of the request or response.
+
+<Note>
+  Verification proofs stay in Ensue shared memory only — they are never written to the NEAR blockchain. The on-chain record contains only aggregate tallies and nullifier hashes.
+</Note>
+
+## ModelAttestation: linking signing_address to TEE hardware
+
+The `signing_address` in a `VerificationProof` is a public key unique to the model. To verify that this key is genuinely controlled by a specific model running inside real TEE hardware — not just a claimed key — you need a **model attestation**.
+
+```typescript
+// shared/src/types.ts
+export interface ModelAttestation {
+  signing_address:    string;  // same as VerificationProof.signing_address
+  model:              string;  // model name
+  nonce:              string;  // random hex nonce (prevents replay)
+  attestation_report: string;  // TEE attestation report (Intel TDX / NVIDIA)
+  attestation_type?:  string;  // e.g. 'TDX', 'NVIDIA'
+}
+```
+
+The worker agent fetches this from the NEAR AI attestation endpoint:
+
+```typescript
+// worker-agent/src/workers/ai-voter.ts
+const nonce = randomBytes(32).toString('hex');
+const url   = `https://cloud-api.near.ai/v1/attestation/report` +
+              `?model=${encodeURIComponent(model)}` +
+              `&signing_algo=ecdsa&nonce=${nonce}`;
+
+const report = await fetch(url, {
+  headers: { Authorization: `Bearer ${apiKey}` },
+}).then(r => r.json());
+
+// Attach the attestation to the verification proof
+verificationProof.attestation = {
+  signing_address:    report.signing_address,
+  model,
+  nonce,
+  attestation_report: report.attestation_report,
+  attestation_type:   report.attestation_type, // 'TDX' or 'NVIDIA'
+};
+```
+
+The `attestation_report` field contains a raw TEE attestation from Intel TDX or NVIDIA Confidential Computing hardware. Third-party attestation verifiers (such as [dcap-attestation](https://github.com/automata-network/automata-dcap-attestation)) can parse this report to confirm:
+
+- The hardware platform is genuine (not emulated)
+- The `signing_address` key was generated inside that hardware enclave
+- The model binary matches the expected measurement
+
+## Why this matters
+
+Without TEE attestation, you have to trust that:
+
+- The AI model provider ran the correct model
+- The model wasn't modified or prompted differently per request
+- The vote result wasn't fabricated after the fact
+
+With TEE attestation and NEAR AI verification proofs, you have cryptographic guarantees:
+
+<CardGroup cols={2}>
+  <Card title="Model integrity" icon="shield-check">
+    The `signing_address` in every `VerificationProof` is bound to a specific model binary via the `ModelAttestation` report. A different model would produce a different signing key.
+  </Card>
+  <Card title="Input/output binding" icon="link">
+    `request_hash` and `response_hash` bind the proof to the exact prompt and response. You can verify the vote was produced by the declared input without seeing the content.
+  </Card>
+  <Card title="Hardware trust" icon="microchip">
+    Intel TDX and NVIDIA attestation reports are hardware-signed. They cannot be forged without access to the physical CPU/GPU signing keys.
+  </Card>
+  <Card title="Non-repudiation" icon="stamp">
+    The ECDSA signature on each proof is non-repudiable. Once issued, neither NEAR AI nor Delibera can claim a vote happened differently than the proof records.
+  </Card>
+</CardGroup>
+
+## Privacy boundary
+
+Verification proofs prove *that* a specific model produced *a specific response* — they do not prove *what* the response said. The `request_hash` and `response_hash` are one-way hashes.
+
+This is intentional. Individual AI votes and reasoning remain private in Ensue. Anyone can audit *that* workers voted using DeepSeek-V3.1 inside verified TEE hardware, but not *how* they voted or *why*.
+
+<Accordion title="Proof verification reference (NEAR AI docs)">
+  The NEAR AI verification proof system is documented at [https://docs.near.ai/cloud/verification/chat](https://docs.near.ai/cloud/verification/chat).
+
+  The endpoint to fetch a proof is:
+  ```
+  GET https://cloud-api.near.ai/v1/signature/{chat_id}?model={model}&signing_algo=ecdsa
+  ```
+
+  The endpoint to fetch a model attestation is:
+  ```
+  GET https://cloud-api.near.ai/v1/attestation/report?model={model}&signing_algo=ecdsa&nonce={nonce}
+  ```
+
+  Both require a valid NEAR AI API key in the `Authorization: Bearer {key}` header.
+</Accordion>

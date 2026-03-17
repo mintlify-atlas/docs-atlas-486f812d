@@ -1,0 +1,110 @@
+---
+title: "Get coordinator status"
+description: "Retrieve the current coordinator status and latest vote tally from Ensue shared memory"
+---
+
+## GET /api/coordinate/status
+
+Returns the coordinator's current operating state, the active proposal ID, and the most recent vote tally.
+
+```bash
+curl http://localhost:3000/api/coordinate/status
+```
+
+### Response fields
+
+<ResponseField name="status" type="string">
+  Current coordinator state. One of: `idle`, `working`, `completed`, `error`
+</ResponseField>
+
+<ResponseField name="proposalId" type="number | null">
+  The ID of the proposal currently being coordinated, or `null` if idle
+</ResponseField>
+
+<ResponseField name="tally" type="TallyResult | null">
+  The most recent vote tally, or `null` if no vote has been tallied yet
+
+  <Expandable title="TallyResult fields">
+    <ResponseField name="aggregatedValue" type="number">
+      Numeric aggregate (approved count minus rejected count)
+    </ResponseField>
+    <ResponseField name="approved" type="number">
+      Number of approved votes
+    </ResponseField>
+    <ResponseField name="rejected" type="number">
+      Number of rejected votes
+    </ResponseField>
+    <ResponseField name="decision" type="string">
+      Final decision: `Approved` or `Rejected`
+    </ResponseField>
+    <ResponseField name="workerCount" type="number">
+      Total number of workers that participated
+    </ResponseField>
+    <ResponseField name="workers" type="WorkerResult[]">
+      Per-worker results including individual votes and reasoning (stays private in Ensue, never on-chain)
+    </ResponseField>
+    <ResponseField name="timestamp" type="string">
+      ISO 8601 timestamp of when the tally was computed
+    </ResponseField>
+    <ResponseField name="proposalId" type="number">
+      The proposal ID this tally belongs to
+    </ResponseField>
+    <ResponseField name="workerNames" type="Record<string, string>">
+      Map of worker DID → display name for all participating workers
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="timestamp" type="string">
+  ISO 8601 timestamp of when this status was read
+</ResponseField>
+
+### Example response
+
+```json
+{
+  "status": "idle",
+  "proposalId": 5,
+  "tally": {
+    "aggregatedValue": 1,
+    "approved": 2,
+    "rejected": 1,
+    "decision": "Approved",
+    "workerCount": 3,
+    "workers": [
+      {
+        "workerId": "did:key:z6Mkworker1",
+        "taskType": "vote",
+        "output": {
+          "value": 1,
+          "vote": "Approved",
+          "reasoning": "This grant program aligns with the DAO manifesto...",
+          "computedAt": "2025-01-15T10:30:00.000Z"
+        },
+        "processingTime": 4521
+      }
+    ],
+    "timestamp": "2025-01-15T10:30:05.000Z",
+    "proposalId": 5,
+    "workerNames": {
+      "did:key:z6Mkworker1": "Alpha",
+      "did:key:z6Mkworker2": "Beta",
+      "did:key:z6Mkworker3": "Gamma"
+    }
+  },
+  "timestamp": "2025-01-15T10:35:00.000Z"
+}
+```
+
+<Note>
+  The `tally.workers` array contains individual AI votes and reasoning. This data lives exclusively in Ensue shared memory — it is never written to the NEAR blockchain. Only the aggregate counts (`approved`, `rejected`, `decision`) are settled on-chain.
+</Note>
+
+### Error response
+
+```json
+{
+  "error": "Failed to get coordinator status",
+  "details": "Ensue connection failed"
+}
+```

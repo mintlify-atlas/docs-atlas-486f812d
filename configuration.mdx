@@ -1,0 +1,293 @@
+---
+title: "Configuration"
+description: "Complete reference for all environment variables across the coordinator agent, worker agents, and frontend dashboard."
+---
+
+Delibera is configured through environment files loaded at startup. Each service reads its own file; there is no shared runtime config injection.
+
+| Service | Environment file |
+|---------|------------------|
+| Coordinator agent | `coordinator-agent/.env.development.local` |
+| Worker 1 | `worker-agent/.env.worker1.local` |
+| Worker 2 | `worker-agent/.env.worker2.local` |
+| Worker 3 | `worker-agent/.env.worker3.local` |
+| Frontend | `frontend/.env.local` |
+| Root (Docker / CI) | `.env` (from `.env.example`) |
+
+<Tip>
+  The root `.env.example` contains Docker image tags and Phala configuration used when building or deploying production containers. Copy it to `.env` and fill in your values before running `docker compose`.
+</Tip>
+
+---
+
+<Tabs>
+  <Tab title="Coordinator">
+    The Coordinator Agent reads `coordinator-agent/.env.development.local` in local mode.
+
+    ### NEAR
+
+    <ParamField path="NEAR_ACCOUNT_ID" type="string" required>
+      The NEAR account that owns the coordinator contract and signs on-chain transactions. Example: `agents-coordinator.testnet`.
+    </ParamField>
+
+    <ParamField path="NEAR_SEED_PHRASE" type="string" required>
+      The 12-word BIP39 seed phrase for `NEAR_ACCOUNT_ID`. Used to derive the signing key. Keep this secret — never commit it to version control.
+    </ParamField>
+
+    <ParamField path="NEXT_PUBLIC_contractId" type="string" required>
+      The NEAR account ID of the deployed Coordinator Contract. Example: `coordinator.agents-coordinator.testnet`.
+    </ParamField>
+
+    <ParamField path="NEAR_NETWORK" type="string">
+      The NEAR network to connect to. Accepted values: `testnet`, `mainnet`. Defaults to `testnet`.
+    </ParamField>
+
+    <ParamField path="NEAR_RPC_JSON" type="string">
+      Custom NEAR RPC endpoint. Defaults to the FastNEAR testnet endpoint (`https://test.rpc.fastnear.com`). Override for mainnet or a private RPC.
+    </ParamField>
+
+    <ParamField path="NEAR_API_KEY" type="string" required>
+      API key for NEAR AI (cloud-api.near.ai). Used by worker agents for DeepSeek-V3.1 inference. The coordinator uses this key when dispatching tasks that include AI calls.
+    </ParamField>
+
+    ### Ensue
+
+    <ParamField path="ENSUE_API_KEY" type="string" required>
+      Your Ensue Memory Network API key. Obtain from [ensue.dev](https://ensue.dev). The coordinator uses this to write coordination state and read worker results.
+    </ParamField>
+
+    <ParamField path="ENSUE_TOKEN" type="string" required>
+      Ensue authentication token. Currently accepts the same value as `ENSUE_API_KEY`. Both variables must be set.
+    </ParamField>
+
+    ### Server
+
+    <ParamField path="PORT" type="number">
+      HTTP port the coordinator listens on. Defaults to `3000`.
+    </ParamField>
+
+    <ParamField path="LOCAL_MODE" type="string">
+      Set to `true` to skip NEAR Shade Agent registration and Phala TEE initialization. Use `true` for all local development. Defaults to `false`.
+    </ParamField>
+
+    <ParamField path="POLL_INTERVAL" type="number">
+      Milliseconds between Ensue polling cycles when monitoring for pending proposals. Defaults to `5000` (5 seconds).
+    </ParamField>
+
+    <ParamField path="WORKERS" type="string">
+      Comma-separated list of worker identifiers used as a fallback when the registry contract is unavailable. Format: `workerId:port` (e.g., `worker1:3001,worker2:3002,worker3:3003`). In production, workers register themselves in the Registry Contract and this variable is not required.
+    </ParamField>
+
+    <ParamField path="COORDINATOR_ENDPOINT_URL" type="string">
+      The public URL of this coordinator, registered in the Registry Contract. Defaults to `http://localhost:{PORT}`.
+    </ParamField>
+
+    <ParamField path="MIN_WORKERS" type="number">
+      Minimum number of workers this coordinator requires. Stored in the registry. Defaults to `1`.
+    </ParamField>
+
+    <ParamField path="MAX_WORKERS" type="number">
+      Maximum number of workers this coordinator supports. Stored in the registry. Defaults to `10`.
+    </ParamField>
+
+    ### NEAR Shade Agent (production only)
+
+    <ParamField path="AGENT_CONTRACT_ID" type="string">
+      The NEAR account ID of the Shade Agent contract. Only required in production (when `LOCAL_MODE` is `false`).
+    </ParamField>
+
+    <ParamField path="SPONSOR_ACCOUNT_ID" type="string">
+      The NEAR account that funds the Shade Agent's balance. Only required in production.
+    </ParamField>
+
+    <ParamField path="SPONSOR_PRIVATE_KEY" type="string">
+      The ed25519 private key of the sponsor account. Only required in production. Keep this secret.
+    </ParamField>
+
+    <ParamField path="API_CODEHASH" type="string">
+      SHA-256 codehash of the deployed Shade Agent API binary. Used by the Shade Agent registration process.
+    </ParamField>
+
+    <ParamField path="APP_CODEHASH" type="string">
+      SHA-256 codehash generated during Docker build. Used for TEE attestation verification.
+    </ParamField>
+
+    ### Storacha
+
+    <ParamField path="STORACHA_AGENT_PRIVATE_KEY" type="string">
+      The base58-encoded private key for the coordinator's `did:key` identity. Generated with `storacha key create`. If unset, the coordinator starts without encrypted archival.
+    </ParamField>
+
+    <ParamField path="STORACHA_DELEGATION_PROOF" type="string">
+      Base64-encoded UCAN delegation granting this agent upload and decrypt capabilities on the configured space. Generated with `storacha delegation create`.
+    </ParamField>
+
+    <ParamField path="STORACHA_SPACE_DID" type="string">
+      The DID of the Storacha space to upload encrypted transcripts to. Example: `did:key:z6Mk...`.
+    </ParamField>
+
+    ### Lit Protocol
+
+    <ParamField path="LIT_NETWORK" type="string">
+      The Lit Protocol network for threshold encryption key generation. Accepted values: `datil` (production), `datil-test` (testnet). Defaults to `datil`.
+    </ParamField>
+
+    ### Phala (production only)
+
+    <ParamField path="PHALA_CVM_ID" type="string">
+      The Phala Confidential Virtual Machine ID assigned to this coordinator container. Set to `local` in development. Required in production to register the coordinator in the Registry Contract.
+    </ParamField>
+  </Tab>
+
+  <Tab title="Worker">
+    Each worker agent reads its own environment file: `worker-agent/.env.worker{N}.local`.
+
+    Create three files — `.env.worker1.local`, `.env.worker2.local`, `.env.worker3.local` — with the following variables. The only differences between files are `WORKER_ID`, `PORT`, and the Storacha credentials (each worker needs a unique identity).
+
+    ### Worker identity
+
+    <ParamField path="WORKER_ID" type="string" required>
+      Unique identifier for this worker instance. Used as the Ensue memory namespace key prefix. Examples: `worker1`, `worker2`, `worker3`.
+    </ParamField>
+
+    <ParamField path="PORT" type="number" required>
+      HTTP port this worker listens on. Use `3001`, `3002`, `3003` for workers 1–3 respectively.
+    </ParamField>
+
+    ### NEAR
+
+    <ParamField path="NEXT_PUBLIC_contractId" type="string" required>
+      The NEAR account ID of the Coordinator Contract. Workers fetch the DAO manifesto from this contract before deliberating. Example: `coordinator.agents-coordinator.testnet`.
+    </ParamField>
+
+    <ParamField path="NEAR_API_KEY" type="string" required>
+      API key for NEAR AI (cloud-api.near.ai). Used to call DeepSeek-V3.1 for proposal deliberation and to obtain NEAR AI verification proofs.
+    </ParamField>
+
+    ### Ensue
+
+    <ParamField path="ENSUE_API_KEY" type="string" required>
+      Your Ensue Memory Network API key. Workers write their vote status, result, and verification proof to Ensue under their `did:key`-namespaced paths.
+    </ParamField>
+
+    <ParamField path="ENSUE_TOKEN" type="string" required>
+      Ensue authentication token. Set to the same value as `ENSUE_API_KEY`.
+    </ParamField>
+
+    ### Storacha
+
+    <ParamField path="STORACHA_AGENT_PRIVATE_KEY" type="string">
+      The base58-encoded private key for this worker's `did:key` identity. Must be **unique per worker** — generate a separate key for each agent with `storacha key create`.
+    </ParamField>
+
+    <ParamField path="STORACHA_DELEGATION_PROOF" type="string">
+      Base64-encoded UCAN delegation for this worker's DID. Generate separately for each worker using `storacha delegation create <WORKER_DID>`.
+    </ParamField>
+
+    <ParamField path="STORACHA_SPACE_DID" type="string">
+      The DID of the shared Storacha space. All workers can share the same space DID — only the agent private key and delegation must be unique.
+    </ParamField>
+
+    ### Example worker file
+
+    ```bash worker-agent/.env.worker1.local
+    WORKER_ID=worker1
+    PORT=3001
+
+    ENSUE_API_KEY=your-ensue-api-key
+    ENSUE_TOKEN=your-ensue-api-key
+
+    NEAR_API_KEY=your-near-ai-api-key
+    NEXT_PUBLIC_contractId=coordinator.agents-coordinator.testnet
+
+    STORACHA_AGENT_PRIVATE_KEY=MgCZG7...
+    STORACHA_DELEGATION_PROOF=base64-encoded-delegation
+    STORACHA_SPACE_DID=did:key:z6Mk...
+    ```
+  </Tab>
+
+  <Tab title="Frontend">
+    The Next.js frontend reads `frontend/.env.local`.
+
+    All variables are prefixed with `NEXT_PUBLIC_` and are safe to expose to the browser.
+
+    <ParamField path="NEXT_PUBLIC_COORDINATOR_URL" type="string" required>
+      Base URL of the Coordinator Agent HTTP server. The frontend uses this for all API calls. Example: `http://localhost:3000` for local development, or your production coordinator URL.
+    </ParamField>
+
+    <ParamField path="NEXT_PUBLIC_NEAR_NETWORK" type="string" required>
+      The NEAR network the frontend connects to. Accepted values: `testnet`, `mainnet`. Must match the network your contracts are deployed on.
+    </ParamField>
+
+    <ParamField path="NEXT_PUBLIC_contractId" type="string" required>
+      The NEAR account ID of the Coordinator Contract. Used for on-chain reads (manifesto, proposal list). Example: `coordinator.agents-coordinator.testnet`.
+    </ParamField>
+
+    <ParamField path="NEXT_PUBLIC_REGISTRY_CONTRACT_ID" type="string" required>
+      The NEAR account ID of the Registry Contract. Used to list active coordinators and workers in the dashboard. Example: `registry.agents-coordinator.testnet`.
+    </ParamField>
+
+    <ParamField path="NEXT_PUBLIC_FACTORY_CONTRACT_ID" type="string">
+      The NEAR account ID of the coordinator factory contract (used by the deploy UI to spin up new coordinator instances). Example: `coord-factory.agents-coordinator.testnet`.
+    </ParamField>
+
+    ### Example frontend file
+
+    ```bash frontend/.env.local
+    NEXT_PUBLIC_COORDINATOR_URL=http://localhost:3000
+    NEXT_PUBLIC_NEAR_NETWORK=testnet
+    NEXT_PUBLIC_contractId=coordinator.agents-coordinator.testnet
+    NEXT_PUBLIC_REGISTRY_CONTRACT_ID=registry.agents-coordinator.testnet
+    NEXT_PUBLIC_FACTORY_CONTRACT_ID=coord-factory.agents-coordinator.testnet
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## Root `.env.example` reference
+
+The root `.env.example` file holds variables used by Docker Compose and CI/CD pipelines. Copy it to `.env` before building images.
+
+```bash .env.example
+# NEAR Configuration
+NEAR_ACCOUNT_ID=agents-coordinator.testnet
+NEAR_SEED_PHRASE="your 12 word seed phrase here"
+NEXT_PUBLIC_contractId=coordinator.agents-coordinator.testnet
+NEAR_RPC_JSON=https://rpc.testnet.near.org
+
+# Ensue Configuration
+ENSUE_API_KEY=your-ensue-api-key
+ENSUE_TOKEN=your-ensue-api-key
+
+# Shade Agent Configuration
+API_CODEHASH=a86e3a4300b069c08d629a38d61a3d780f7992eaf36aa505e4527e466553e2e5
+APP_CODEHASH=generated-during-docker-build
+
+# Worker Agent 1
+WORKER1_PORT=3001
+WORKER1_ID=worker1
+DOCKER_TAG_WORKER1=yourusername/worker-agent-1:latest
+
+# Worker Agent 2
+WORKER2_PORT=3002
+WORKER2_ID=worker2
+DOCKER_TAG_WORKER2=yourusername/worker-agent-2:latest
+
+# Worker Agent 3
+WORKER3_PORT=3003
+WORKER3_ID=worker3
+DOCKER_TAG_WORKER3=yourusername/worker-agent-3:latest
+
+# Coordinator Agent
+COORDINATOR_PORT=3000
+DOCKER_TAG_COORDINATOR=yourusername/coordinator-agent:latest
+POLL_INTERVAL=5000
+
+# Phala Cloud
+PHALA_API_KEY=your-phala-api-key
+
+# NEAR Contract IDs (frontend)
+NEXT_PUBLIC_FACTORY_CONTRACT_ID=coord-factory.agents-coordinator.testnet
+NEXT_PUBLIC_REGISTRY_CONTRACT_ID=registry.agents-coordinator.testnet
+```

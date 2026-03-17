@@ -1,0 +1,176 @@
+---
+title: 'Testnet contracts'
+description: 'Deployed contract addresses, NEAR RPC endpoints, CLI commands for contract interaction, and the contract build pipeline.'
+keywords: ['testnet', 'contracts', 'NEAR CLI', 'deployment', 'RPC', 'coordinator contract', 'registry contract']
+---
+
+## Deployed contracts
+
+| Contract | Account ID |
+|----------|------------|
+| Coordinator | `coordinator.agents-coordinator.testnet` |
+| Registry | `registry.agents-coordinator.testnet` |
+| Owner | `agents-coordinator.testnet` |
+
+## NEAR RPC endpoints
+
+| Network | Endpoint |
+|---------|----------|
+| Testnet | `https://test.rpc.fastnear.com` |
+| Mainnet | `https://rpc.fastnear.com` |
+
+Set `NEAR_RPC_JSON` to override the default RPC in any agent:
+
+```bash
+NEAR_RPC_JSON=https://test.rpc.fastnear.com
+```
+
+## Coordinator contract methods
+
+### View methods (free, no gas)
+
+```bash
+# Read the DAO manifesto
+near view coordinator.agents-coordinator.testnet get_manifesto \
+  --networkId testnet
+
+# List all proposals with their current state
+near view coordinator.agents-coordinator.testnet get_all_proposals \
+  --networkId testnet
+```
+
+### Change methods (require signed transaction)
+
+```bash
+# Submit a new proposal (creates a yielded promise)
+near call coordinator.agents-coordinator.testnet submit_proposal \
+  '{"task_config": "{\\"type\\":\\"vote\\",\\"parameters\\":{\\"proposal\\":\\"Fund a developer grant\\"}}" }' \
+  --accountId your-account.testnet \
+  --networkId testnet \
+  --gas 100000000000000
+
+# Set or update the DAO manifesto (owner only)
+near call coordinator.agents-coordinator.testnet set_manifesto \
+  '{"manifesto": "We fund open-source public goods on NEAR."}' \
+  --accountId agents-coordinator.testnet \
+  --networkId testnet
+
+# Register a worker agent on-chain
+near call coordinator.agents-coordinator.testnet register_worker \
+  '{"worker_id": "did:key:z6Mk...", "endpoint": "https://worker1.example.com"}' \
+  --accountId agents-coordinator.testnet \
+  --networkId testnet
+
+# Approve an agent codehash (owner only)
+near call coordinator.agents-coordinator.testnet approve_codehash \
+  '{"codehash": "a86e3a4300b069c08d629a38d61a3d780f7992eaf36aa505e4527e466553e2e5"}' \
+  --accountId agents-coordinator.testnet \
+  --networkId testnet
+```
+
+## Registry contract methods
+
+### View methods
+
+```bash
+# List all active coordinators
+near view registry.agents-coordinator.testnet list_active_coordinators \
+  --networkId testnet
+
+# List all active workers
+near view registry.agents-coordinator.testnet list_active_workers \
+  --networkId testnet
+```
+
+### Change methods
+
+```bash
+# Register a coordinator (0.1 NEAR deposit required)
+near call registry.agents-coordinator.testnet register_coordinator \
+  '{"endpoint": "https://coordinator.example.com", "cvm_id": "cvm-abc123"}' \
+  --accountId your-account.testnet \
+  --deposit 0.1 \
+  --networkId testnet
+
+# Register a worker (0.1 NEAR deposit required)
+near call registry.agents-coordinator.testnet register_worker \
+  '{"endpoint": "https://worker1.example.com", "cvm_id": "cvm-def456"}' \
+  --accountId your-account.testnet \
+  --deposit 0.1 \
+  --networkId testnet
+```
+
+<Info>
+The 0.1 NEAR deposit covers on-chain storage for the registry entry. It is not consumed — but it is locked until the registration is removed.
+</Info>
+
+## Building contracts
+
+Contracts are written in Rust targeting `wasm32-unknown-unknown`. The build script uses a pinned nightly Rust toolchain to produce WASM binaries compatible with NEAR testnet (MVP instruction set only).
+
+### Prerequisites
+
+```bash
+# Install Rust and the WASM target
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+rustup target add wasm32-unknown-unknown
+
+# Install wasm-opt and wasm-tools for post-build optimization
+cargo install wasm-opt
+cargo install wasm-tools
+```
+
+### Build all contracts
+
+```bash
+./build-contracts.sh
+```
+
+This builds and optimizes three contracts:
+
+| Contract | Output |
+|----------|--------|
+| Registry | `registry-contract/target/near/registry_contract.wasm` |
+| Coordinator | `coordinator-contract/target/near/coordinator_contract.wasm` |
+| Factory | `factory-contract/target/near/coordinator_factory.wasm` |
+
+To build a single contract:
+
+```bash
+# Build only the coordinator
+BUILD_REGISTRY=0 BUILD_FACTORY=0 ./build-contracts.sh
+
+# Build only the registry
+BUILD_COORDINATOR=0 BUILD_FACTORY=0 ./build-contracts.sh
+```
+
+<Note>
+The build script uses `RUSTFLAGS='-C target-cpu=mvp -C target-feature=-bulk-memory,-sign-ext,-multivalue,-reference-types'` and post-processes the WASM with `wasm-opt --signext-lowering --mvp-features`. This is required because NEAR testnet rejects non-MVP WASM instructions.
+</Note>
+
+### Deploy a contract
+
+```bash
+# Deploy the coordinator contract
+near deploy coordinator.agents-coordinator.testnet \
+  coordinator-contract/target/near/coordinator_contract.wasm \
+  --accountId agents-coordinator.testnet \
+  --networkId testnet
+
+# Deploy the registry contract
+near deploy registry.agents-coordinator.testnet \
+  registry-contract/target/near/registry_contract.wasm \
+  --accountId agents-coordinator.testnet \
+  --networkId testnet
+```
+
+<Warning>
+Deploying a new contract version to an existing account migrates the on-chain state. Ensure the new contract includes a state migration method if the storage layout has changed.
+</Warning>
+
+## Contract method reference
+
+For the full method signatures and parameter types for both contracts, see:
+
+- [Coordinator contract methods](/api/contracts/coordinator-methods)
+- [Registry contract methods](/api/contracts/registry-methods)

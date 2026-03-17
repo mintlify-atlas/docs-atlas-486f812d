@@ -1,0 +1,136 @@
+---
+title: 'Lit Protocol'
+description: 'Threshold encryption for deliberation transcripts — only authorized parties can decrypt stored deliberation data.'
+keywords: ['Lit Protocol', 'threshold encryption', 'access control', 'ACC', 'decryption', 'privacy']
+---
+
+Delibera uses [Lit Protocol](https://litprotocol.com/) to encrypt deliberation transcripts before they are uploaded to Storacha. Encryption is threshold-based: no single node holds the decryption key. The key is reconstructed only when an authorized party satisfies the Access Control Conditions (ACC).
+
+## Why threshold encryption
+
+Storing deliberation transcripts on IPFS without encryption would make all individual votes and reasoning publicly readable — defeating Delibera's privacy model. Lit solves this by splitting the encryption key across the Lit network. No single gateway or storage provider can decrypt the data.
+
+## Configuration
+
+Set the Lit network in every coordinator agent environment file:
+
+```bash
+# coordinator-agent/.env.development.local
+LIT_NETWORK=datil
+```
+
+The `datil` network is Lit Protocol's production network. For local testing you may also use `datil-dev` or `naga-dev` (the vault defaults to `nagaDev` internally).
+
+<Warning>
+Worker agents do not directly use Lit Protocol — only the coordinator performs vault operations. Workers vote and write results to Ensue; the coordinator encrypts the complete transcript after aggregation.
+</Warning>
+
+## The vault pattern
+
+Every Storacha upload in Delibera goes through the vault:
+
+```
+JSON transcript
+      ↓
+  Lit encryption (threshold ACC)
+      ↓
+  Encrypted blob uploaded to Storacha
+      ↓
+  CID returned and stored in Ensue
+```
+
+The vault module composes two packages:
+
+- `@storacha/encrypt-upload-client` — handles the upload protocol
+- `@lit-protocol/lit-client` — provides the encryption primitive
+
+```typescript
+import { getEncryptedClient } from './storacha/vault';
+
+// The encrypted client combines a Storacha client with a Lit crypto adapter
+const encryptedClient = await getEncryptedClient();
+
+const cid = await encryptedClient.encryptAndUploadFile(
+  blob,
+  {
+    issuer: storachaClient.agent,
+    spaceDID: currentSpace.did(),
+    proofs: storachaClient.proofs(),
+    fileMetadata: { name: 'deliberation-42.json', type: 'application/json' },
+  },
+);
+```
+
+## Access Control Conditions
+
+Lit Access Control Conditions define who can decrypt data. In Delibera, the ACC is tied to the Storacha space DID and the issuing agent — only the agent that encrypted the data (or a party it has delegated to) can reconstruct the key.
+
+Decryption requires a UCAN delegation proof with the `space/content/decrypt` capability:
+
+```bash
+# Include space/content/decrypt when creating the delegation
+storacha delegation create <AGENT_DID> \
+  --can 'space/blob/add' \
+  --can 'space/index/add' \
+  --can 'upload/add' \
+  --can 'upload/list' \
+  --can 'space/content/decrypt' \
+  -o delegation.car
+```
+
+## Threshold decryption
+
+Decryption reconstructs the key from the Lit network threshold and streams the plaintext:
+
+```typescript
+import { retrieveAndDecrypt } from './storacha/vault';
+
+const data = await retrieveAndDecrypt(
+  cidString,       // IPFS CID of the encrypted object
+  wallet,          // viem Account (Ethereum-compatible wallet for Lit auth)
+  decryptDelegation, // UCAN proof with space/content/decrypt capability
+);
+// Returns the original JSON object
+```
+
+The decryption flow is:
+
+1. Retrieve the encrypted CAR file from the IPFS gateway
+2. Contact the Lit network to reconstruct the decryption key (requires ACC to be satisfied)
+3. Decrypt the payload and return the original JSON
+
+## Session keys
+
+Lit derives per-session keys using the auth manager. Keys are scoped to the application name and network, and stored locally by the node storage plugin:
+
+```typescript
+const authManager = createAuthManager({
+  storage: storagePlugins.localStorageNode({
+    appName: 'delibera-coordinator',
+    networkName: 'naga-dev',
+    storagePath: './.lit-auth-storage',
+  }),
+});
+```
+
+Each coordinator instance maintains its own session key. Session keys are not shared between agents.
+
+## Gateway fallback
+
+The vault tries multiple IPFS gateways in order when retrieving encrypted content:
+
+1. `STORACHA_GATEWAY_URL` (default `https://storacha.link`)
+2. `https://w3s.link`
+3. `https://dweb.link`
+4. `https://ipfs.io`
+
+Each gateway is tried twice with a 1.5-second delay between attempts before moving to the next.
+
+## Environment variable reference
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `LIT_NETWORK` | No | Lit network to connect to (default: `datil`) |
+| `STORACHA_AGENT_PRIVATE_KEY` | Yes | Agent key used as Lit issuer identity |
+| `STORACHA_DELEGATION_PROOF` | Yes | Must include `space/content/decrypt` capability |
+| `STORACHA_GATEWAY_URL` | No | Primary retrieval gateway for encrypted content |

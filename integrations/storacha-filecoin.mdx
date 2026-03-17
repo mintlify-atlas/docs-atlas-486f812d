@@ -1,0 +1,205 @@
+---
+title: 'Storacha and Filecoin'
+description: 'Threshold-encrypted warm storage for deliberation transcripts, with automatic archival to Filecoin cold storage.'
+keywords: ['Storacha', 'Filecoin', 'IPFS', 'encryption', 'Lit Protocol', 'CID', 'UCAN', 'did:key']
+---
+
+Delibera uses a two-tier persistent storage stack:
+
+- **Storacha** (warm) — encrypted deliberation transcripts stored as IPFS CIDs, retrievable at any time
+- **Filecoin** (cold) — automatic Proof-of-Spacetime deals created by Storacha for every upload, verified via IPNI
+
+This layer is optional. If Storacha credentials are not set, deliberation runs normally and only Ensue memory is used. When credentials are present, every completed deliberation is encrypted with Lit Protocol and uploaded automatically.
+
+## Data flow
+
+```
+Vote complete
+     ↓
+Encrypt transcript with Lit Protocol ACC
+     ↓
+Upload encrypted blob to Storacha (IPFS)
+     ↓  (automatic, handled by Storacha)
+Filecoin storage deal created (Proof of Spacetime)
+     ↓
+CID returned → stored in Ensue + logged to coordinator contract
+     ↓
+IPNI indexing confirmed at cid.contact
+```
+
+## Identity model
+
+Each agent has a sovereign `did:key` identity backed by an Ed25519 private key. The key is used to authenticate with Storacha via UCAN delegation — no shared secrets, no centralized auth.
+
+## Setting up Storacha
+
+<Steps>
+  <Step title="Install the Storacha CLI">
+    ```bash
+    npm install -g @storacha/cli
+    ```
+  </Step>
+
+  <Step title="Log in">
+    One-time login with your email address:
+    ```bash
+    storacha login you@example.com
+    ```
+  </Step>
+
+  <Step title="Create a space">
+    ```bash
+    storacha space create delibera-v2
+    storacha space provision --provider did:web:storacha.network
+    ```
+  </Step>
+
+  <Step title="Generate agent keys">
+    Generate a unique key for each agent (coordinator and each worker):
+    ```bash
+    storacha key create
+    # → Private key: MgCZG7...  ← this is STORACHA_AGENT_PRIVATE_KEY
+    # → Agent DID:   did:key:z6Mk...
+    ```
+  </Step>
+
+  <Step title="Create a UCAN delegation">
+    Delegate upload and decrypt capabilities to the agent DID:
+    ```bash
+    storacha delegation create <AGENT_DID> \
+      --can 'space/blob/add' \
+      --can 'space/index/add' \
+      --can 'upload/add' \
+      --can 'upload/list' \
+      --can 'space/content/decrypt' \
+      -o delegation.car
+
+    base64 delegation.car
+    # → this base64 string is STORACHA_DELEGATION_PROOF
+    ```
+  </Step>
+
+  <Step title="Configure environment variables">
+    ```bash
+    STORACHA_AGENT_PRIVATE_KEY=MgCZG7...         # Ed25519 private key from step 4
+    STORACHA_DELEGATION_PROOF=base64-car-here     # Base64 delegation from step 5
+    STORACHA_SPACE_DID=did:key:z6Mk...            # Optional — space DID for logging
+    STORACHA_GATEWAY_URL=https://storacha.link    # Optional — primary IPFS gateway
+    ```
+  </Step>
+</Steps>
+
+<Note>
+Each agent must have its **own** private key and delegation. Never share `STORACHA_AGENT_PRIVATE_KEY` between agents.
+</Note>
+
+## Vault operations
+
+The vault module (`coordinator-agent/src/storacha/vault.ts`) exposes two main operations:
+
+### Encrypting and uploading
+
+```typescript
+import { encryptAndVault } from './storacha/vault';
+
+const cid = await encryptAndVault(
+  { proposalId: '42', tally: { approved: 2, rejected: 1 }, ... },
+  { name: 'deliberation-42.json' },
+);
+// → 'bafyrei...'
+```
+
+Internally, `encryptAndVault` calls `@storacha/encrypt-upload-client` with a Lit Protocol crypto adapter. Lit derives a threshold encryption key for the data before it is written to Storacha.
+
+### Retrieving and decrypting
+
+```typescript
+import { retrieveAndDecrypt } from './storacha/vault';
+
+const data = await retrieveAndDecrypt(
+  'bafyrei...',  // CID from encryptAndVault
+  wallet,        // viem Account for Lit auth
+  decryptDelegation, // UCAN proof with space/content/decrypt
+);
+```
+
+Retrieval tries the primary gateway (`STORACHA_GATEWAY_URL`, default `https://storacha.link`) first, then falls back to `https://w3s.link`, `https://dweb.link`, and `https://ipfs.io` with 2 retries per gateway.
+
+### Checking vault availability
+
+```typescript
+import { isVaultConfigured } from './storacha/vault';
+
+if (isVaultConfigured()) {
+  // STORACHA_AGENT_PRIVATE_KEY and STORACHA_DELEGATION_PROOF are both set
+}
+```
+
+## Deliberation backup
+
+The coordinator calls `backupDeliberation()` after every successful on-chain resume. This stores the full transcript — task config, tally, and per-worker results — as an encrypted IPFS object:
+
+```typescript
+const cid = await backupDeliberation(
+  proposalId,  // number or string
+  taskConfig,  // original JSON task config string
+  tally,       // TallyResult
+);
+// CID is logged to Ensue at coordination/archival/{proposalId}
+```
+
+## Ensue tree backup
+
+The entire Ensue coordination tree can also be snapshotted and uploaded to Storacha. This is useful for disaster recovery or audit:
+
+```typescript
+import { backupEnsueTree } from './storacha/ensue-backup';
+
+const cid = await backupEnsueTree();
+// Reads all keys under coordination/, encrypts the snapshot, uploads to Storacha
+```
+
+## Filecoin archival
+
+Storacha creates Filecoin deals automatically. The `archiveCID()` function in `coordinator-agent/src/filecoin/archiver.ts` verifies and records these deals:
+
+```typescript
+import { archiveCID, logArchivalToNear } from './filecoin/archiver';
+
+const record = await archiveCID('bafyrei...');
+// {
+//   cid: 'bafyrei...',
+//   status: 'archived' | 'pending' | 'failed',
+//   dealReference: 'fil-a3c8e5f1d2b4...',  // deterministic, content-derived
+//   providers: [{ id: '12D3...', addresses: [...], protocol: 'filecoin-sp' }],
+//   gateway: { url: 'https://w3s.link/ipfs/bafyrei...', reachable: true },
+//   storachaSpace: 'did:key:z6Mk...',
+//   archivedAt: '2025-01-01T00:00:00.000Z',
+// }
+
+await logArchivalToNear(record, proposalId);
+```
+
+### IPNI verification
+
+Archival confirmation queries the [InterPlanetary Network Indexer](https://cid.contact):
+
+```
+GET https://cid.contact/cid/{cid}
+```
+
+If the IPNI response lists at least one Filecoin storage provider for the CID, the status is `archived`. If IPNI returns providers but the w3s.link gateway is unreachable, status is `pending`. If neither confirms, status is `failed`.
+
+<Tip>
+Filecoin deals take time to appear in IPNI. If you see `pending` immediately after upload, wait a few minutes and re-check. Storacha's deal pipeline is asynchronous.
+</Tip>
+
+## Environment variable reference
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `STORACHA_AGENT_PRIVATE_KEY` | Yes | Ed25519 private key from `storacha key create` |
+| `STORACHA_DELEGATION_PROOF` | Yes | Base64-encoded UCAN delegation CAR |
+| `STORACHA_SPACE_DID` | No | Space DID for logging and verification |
+| `STORACHA_GATEWAY_URL` | No | Primary IPFS gateway (default: `https://storacha.link`) |
+| `LIT_NETWORK` | No | Lit network for encryption (default: `datil`) |

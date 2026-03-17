@@ -1,0 +1,166 @@
+---
+title: 'NEAR AI'
+description: 'DeepSeek-V3.1 inference with TEE-backed verification proofs for tamper-evident agent voting.'
+keywords: ['NEAR AI', 'DeepSeek', 'verification proof', 'attestation', 'TEE', 'model signing']
+---
+
+Delibera uses [NEAR AI](https://near.ai/) to run the DeepSeek-V3.1 model for every voter agent deliberation. NEAR AI wraps inference in a Trusted Execution Environment (TEE) and returns a signed **verification proof** alongside each completion — cryptographic evidence of exactly which model ran, without exposing the prompt or response content.
+
+## How it fits in Delibera
+
+Each worker agent calls the NEAR AI API with the DAO manifesto, the proposal text, and its own agent identity context. The model responds via tool call with a structured `{ vote, reasoning }` object. After the completion, the worker fetches a verification proof tied to that specific `chat_id` and stores both the vote and the proof in Ensue shared memory.
+
+This means every vote cast in Delibera is verifiably linked to DeepSeek-V3.1 running inside a genuine TEE — without the vote content ever touching the NEAR blockchain.
+
+## Getting an API key
+
+Obtain a NEAR AI API key from the [NEAR AI Cloud console](https://cloud-api.near.ai).
+
+```bash
+export NEAR_API_KEY=your-near-ai-api-key
+```
+
+Set this variable in each agent's environment file:
+
+```bash
+# coordinator-agent/.env.development.local
+NEAR_API_KEY=your-near-ai-api-key
+
+# worker-agent/.env.worker1.local
+NEAR_API_KEY=your-near-ai-api-key
+```
+
+The worker agent also accepts `NEAR_AI_API_KEY` as an alias — both names are checked.
+
+## The model: DeepSeek-V3.1
+
+All deliberation uses `deepseek-ai/DeepSeek-V3.1`. The model is invoked with a forced tool call (`dao_vote`) so the response is always structured JSON:
+
+```typescript
+// worker-agent/src/workers/ai-voter.ts
+const request = {
+  model: 'deepseek-ai/DeepSeek-V3.1',
+  tools: [{
+    type: 'function',
+    function: {
+      name: 'dao_vote',
+      parameters: {
+        type: 'object',
+        properties: {
+          vote: { type: 'string', enum: ['Approved', 'Rejected'] },
+          reasoning: { type: 'string' },
+        },
+        required: ['vote', 'reasoning'],
+      },
+    },
+  }],
+  tool_choice: { type: 'function', function: { name: 'dao_vote' } },
+  messages: [
+    { role: 'system', content: SYSTEM_MESSAGE },
+    { role: 'user', content: userMessage },
+  ],
+};
+```
+
+The base URL points to the NEAR AI cloud endpoint:
+
+```typescript
+const openai = new OpenAI({
+  baseURL: 'https://cloud-api.near.ai/v1',
+  apiKey,
+});
+```
+
+## Verification proofs
+
+After each completion, the worker fetches a verification proof using the `chat_id` returned in the API response. The proof signs a `request_hash:response_hash` string with an ECDSA key unique to the TEE that ran the model.
+
+### VerificationProof fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `chat_id` | `string` | Identifier of the specific chat completion |
+| `model` | `string` | Model that produced the response (e.g. `deepseek-ai/DeepSeek-V3.1`) |
+| `request_hash` | `string` | SHA-256 hash of the request payload |
+| `response_hash` | `string` | SHA-256 hash of the model response |
+| `signature` | `string` | ECDSA signature over `request_hash:response_hash` |
+| `signing_address` | `string` | TEE public key address that produced the signature |
+| `signing_algo` | `string` | Signing algorithm (always `ecdsa`) |
+| `timestamp` | `number` | Unix milliseconds when the proof was generated |
+| `attestation` | `ModelAttestation` | Optional hardware attestation report (see below) |
+
+### Fetching a proof
+
+The proof endpoint takes a `chat_id` and `model`:
+
+```typescript
+const url =
+  `https://cloud-api.near.ai/v1/signature/${encodeURIComponent(chatId)}` +
+  `?model=${encodeURIComponent(model)}&signing_algo=ecdsa`;
+
+const res = await fetch(url, {
+  headers: { Authorization: `Bearer ${apiKey}` },
+});
+
+const { text, signature, signing_address, signing_algo } = await res.json();
+// text is "request_hash:response_hash"
+const [request_hash, response_hash] = text.split(':');
+```
+
+### Verifying the signature
+
+You can verify any proof independently using a standard ECDSA library:
+
+```typescript
+import { ethers } from 'ethers';
+
+const message = `${proof.request_hash}:${proof.response_hash}`;
+const recovered = ethers.verifyMessage(message, proof.signature);
+console.log(recovered === proof.signing_address); // true → proof is valid
+```
+
+## Model attestation
+
+Beyond signing the response, NEAR AI also provides a **hardware attestation report** that links the `signing_address` back to specific TEE hardware. This closes the full trust chain: you know not just *which model* ran, but that it ran inside a genuine Intel TDX or NVIDIA confidential computing environment.
+
+### ModelAttestation fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `signing_address` | `string` | TEE public key — matches `VerificationProof.signing_address` |
+| `model` | `string` | Model name |
+| `nonce` | `string` | Random hex nonce used in the attestation request |
+| `attestation_report` | `string` | Raw TEE attestation report (base64 or hex) |
+| `attestation_type` | `string` | Hardware type: `intel-tdx` or `nvidia-h100` |
+
+### Fetching the attestation
+
+```typescript
+const nonce = randomBytes(32).toString('hex');
+const url =
+  `https://cloud-api.near.ai/v1/attestation/report` +
+  `?model=${encodeURIComponent(model)}&signing_algo=ecdsa&nonce=${nonce}`;
+
+const res = await fetch(url, {
+  headers: { Authorization: `Bearer ${apiKey}` },
+});
+
+const { signing_address, attestation_report, attestation_type } = await res.json();
+```
+
+<Note>
+Attestation fetching is non-blocking in Delibera. If the attestation API is unavailable, the vote is still recorded — the `attestation` field will simply be `undefined` on the stored proof.
+</Note>
+
+## Privacy model
+
+Verification proofs are stored in Ensue shared memory alongside the vote, never on-chain. The NEAR blockchain only receives the aggregate tally. This means:
+
+- Individual votes and reasoning stay private
+- The proof is available for audit by any party with Ensue read access
+- Nothing in the proof reveals what the model said or how it voted
+
+## Further reading
+
+- [NEAR AI verification docs](https://docs.near.ai/cloud/verification/chat)
+- [NEAR AI Cloud console](https://cloud-api.near.ai)

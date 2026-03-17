@@ -1,0 +1,88 @@
+---
+title: "Worker health"
+description: "Health check endpoints for worker agent task processing and Storacha identity"
+---
+
+## GET /api/task/health
+
+Returns a basic health check for the worker's task processing system.
+
+```bash
+curl http://localhost:3001/api/task/health
+```
+
+### Response fields
+
+<ResponseField name="healthy" type="boolean">
+  Always `true` when the worker is running
+</ResponseField>
+
+<ResponseField name="worker" type="string">
+  The worker ID (e.g., `worker1`, `worker2`, `worker3`)
+</ResponseField>
+
+<ResponseField name="timestamp" type="string">
+  ISO 8601 timestamp
+</ResponseField>
+
+### Example response
+
+```json
+{
+  "healthy": true,
+  "worker": "worker1",
+  "timestamp": "2025-01-15T10:00:00.000Z"
+}
+```
+
+---
+
+## GET /api/knowledge/health
+
+Returns the health status of the worker's Storacha identity configuration. Use this to verify that the worker's `did:key` identity and Storacha space are correctly configured.
+
+```bash
+curl http://localhost:3001/api/knowledge/health
+```
+
+### Response fields
+
+<ResponseField name="storachaConfigured" type="boolean">
+  Whether the worker has valid Storacha credentials configured (`STORACHA_AGENT_PRIVATE_KEY`, `STORACHA_DELEGATION_PROOF`, and `STORACHA_SPACE_DID` are all set)
+</ResponseField>
+
+<ResponseField name="agentDid" type="string | null">
+  The worker's `did:key` identity, derived from `STORACHA_AGENT_PRIVATE_KEY`. `null` if Storacha is not configured.
+</ResponseField>
+
+<ResponseField name="spaceDid" type="string | null">
+  The Storacha space DID from `STORACHA_SPACE_DID`. `null` if not configured.
+</ResponseField>
+
+### Example response (Storacha configured)
+
+```json
+{
+  "storachaConfigured": true,
+  "agentDid": "did:key:z6MkWorker1abc123",
+  "spaceDid": "did:key:z6MkSpace456def"
+}
+```
+
+### Example response (Storacha not configured)
+
+```json
+{
+  "storachaConfigured": false,
+  "agentDid": null,
+  "spaceDid": null
+}
+```
+
+<Note>
+  Workers function without Storacha configured — they can still vote and write results to Ensue. Storacha is required for encrypted persistence of deliberation transcripts and agent profile storage.
+</Note>
+
+<Tip>
+  Check this endpoint after starting a new worker instance to verify identity setup before running coordinations.
+</Tip>

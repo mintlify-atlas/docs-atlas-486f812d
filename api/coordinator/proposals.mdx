@@ -1,0 +1,180 @@
+---
+title: "Proposals"
+description: "List and inspect archived proposals from Ensue shared memory"
+---
+
+## GET /api/coordinate/proposals
+
+Lists all archived proposals stored in Ensue shared memory, with optional filtering by worker DID.
+
+```bash
+# List all proposals
+curl http://localhost:3000/api/coordinate/proposals
+
+# Filter to proposals a specific worker participated in
+curl "http://localhost:3000/api/coordinate/proposals?workerDid=did%3Akey%3Az6MkWorker1abc"
+```
+
+### Query parameters
+
+<ParamField query="workerDid" type="string">
+  Optional. Filter to only proposals where the specified worker DID submitted a result. URL-encode the DID value.
+</ParamField>
+
+### Response fields
+
+<ResponseField name="proposals" type="ProposalSummary[]">
+  Array of proposal summaries
+
+  <Expandable title="ProposalSummary fields">
+    <ResponseField name="proposalId" type="string">
+      The proposal ID (numeric, as string key in Ensue)
+    </ResponseField>
+    <ResponseField name="status" type="string">
+      Proposal status from Ensue: `Created`, `WorkersCompleted`, `Finalized`, `TimedOut`, or `unknown`
+    </ResponseField>
+    <ResponseField name="decision" type="string | null">
+      Final decision: `Approved`, `Rejected`, or `null` if not yet finalized
+    </ResponseField>
+    <ResponseField name="approved" type="number | null">
+      Approved vote count, or `null` if not tallied
+    </ResponseField>
+    <ResponseField name="rejected" type="number | null">
+      Rejected vote count, or `null` if not tallied
+    </ResponseField>
+    <ResponseField name="workerCount" type="number | null">
+      Number of workers that participated
+    </ResponseField>
+    <ResponseField name="timestamp" type="string | null">
+      ISO 8601 timestamp of the tally
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="total" type="number">
+  Total number of proposals returned
+</ResponseField>
+
+### Example response
+
+```json
+{
+  "proposals": [
+    {
+      "proposalId": "1",
+      "status": "Finalized",
+      "decision": "Approved",
+      "approved": 2,
+      "rejected": 1,
+      "workerCount": 3,
+      "timestamp": "2025-01-15T10:30:00.000Z"
+    }
+  ],
+  "total": 1
+}
+```
+
+---
+
+## GET /api/coordinate/proposals/:id
+
+Returns full details for a specific archived proposal, including per-worker results.
+
+```bash
+curl http://localhost:3000/api/coordinate/proposals/1
+```
+
+### Path parameters
+
+<ParamField path="id" type="string" required>
+  The proposal ID to retrieve
+</ParamField>
+
+### Response fields
+
+<ResponseField name="proposalId" type="string">
+  The proposal ID
+</ResponseField>
+
+<ResponseField name="status" type="string">
+  Current lifecycle state of the proposal
+</ResponseField>
+
+<ResponseField name="config" type="object | string | null">
+  The task configuration that was submitted with this proposal (parsed JSON or raw string)
+</ResponseField>
+
+<ResponseField name="tally" type="TallyResult | null">
+  Full vote tally including per-worker results (see [coordinator status](/api/coordinator/status) for TallyResult fields)
+</ResponseField>
+
+<ResponseField name="workers" type="Record<string, WorkerDetail>">
+  Per-worker results keyed by worker DID
+
+  <Expandable title="WorkerDetail fields">
+    <ResponseField name="result" type="WorkerResult">
+      The worker's vote result object
+    </ResponseField>
+    <ResponseField name="timestamp" type="string | null">
+      When the worker submitted its result
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+### Example response
+
+```json
+{
+  "proposalId": "1",
+  "status": "Finalized",
+  "config": {
+    "type": "vote",
+    "parameters": {
+      "proposal": "Fund a developer grant program for 10,000 NEAR"
+    }
+  },
+  "tally": {
+    "aggregatedValue": 1,
+    "approved": 2,
+    "rejected": 1,
+    "decision": "Approved",
+    "workerCount": 3,
+    "timestamp": "2025-01-15T10:30:00.000Z"
+  },
+  "workers": {
+    "did:key:z6MkWorker1abc": {
+      "result": {
+        "workerId": "did:key:z6MkWorker1abc",
+        "taskType": "vote",
+        "output": {
+          "value": 1,
+          "vote": "Approved",
+          "reasoning": "The grant program aligns with...",
+          "computedAt": "2025-01-15T10:29:50.000Z"
+        }
+      },
+      "timestamp": "2025-01-15T10:29:51.000Z"
+    }
+  }
+}
+```
+
+### Error response (404)
+
+```json
+{
+  "error": "Proposal not found"
+}
+```
+
+---
+
+## GET /api/coordinate/pending
+
+Lists proposals currently in the `Created` state — those that have been submitted on-chain but not yet processed by the coordinator.
+
+```bash
+curl http://localhost:3000/api/coordinate/pending
+```
+
+In `LOCAL_MODE=true`, this always returns an empty list.

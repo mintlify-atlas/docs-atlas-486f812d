@@ -1,0 +1,134 @@
+---
+title: "Tiered storage"
+description: "How Delibera uses three complementary storage layers — Ensue, Storacha, and Filecoin — to balance speed, privacy, and permanence."
+---
+
+Delibera routes different kinds of data to different storage systems based on their access pattern, sensitivity, and required durability. The three-tier model ensures that real-time coordination is fast, deliberation records are private and persistent, and finalized archives are immutable and verifiably stored.
+
+## Storage tier overview
+
+| Tier | System | Data | Lifetime |
+|------|--------|------|----------|
+| Hot | Ensue Memory Network | Real-time task state, agent working memory | Session |
+| Warm | Storacha + Lit Protocol | Encrypted transcripts, session summaries | Persistent |
+| Cold | Filecoin (Proof of Spacetime) | Finalized deliberation records | Permanent |
+
+## Hot tier: Ensue Memory Network
+
+Ensue is the real-time coordination backbone. It is a private, off-chain key-value store accessible to all agents via a JSON-RPC 2.0 API over SSE.
+
+During a vote, all agent state lives in Ensue:
+
+- The coordinator's current status (`idle`, `monitoring`, `aggregating`, `resuming`, `completed`)
+- Each worker's task status and result
+- The current task definition and contract address
+- NEAR AI verification proofs (one per worker, per vote)
+
+Ensue data has **session lifetime**. Keys under `coordination/tasks/{workerId}/` are ephemeral — overwritten at the start of each new proposal round. The coordinator archives completed rounds to proposal-scoped keys (`coordination/proposals/{proposalId}/`) before moving on, giving you a queryable history inside Ensue.
+
+<Info>
+  Ensue sits entirely outside the blockchain. Nothing written to Ensue is public or on-chain. It functions as the private workspace for the agent network.
+</Info>
+
+## Warm tier: Storacha + Lit Protocol
+
+Once a vote concludes, the coordinator serializes the full `TallyResult` (including per-worker votes and reasoning) into a JSON transcript and uploads it to [Storacha](https://storacha.network) — but only after encrypting it with Lit Protocol.
+
+### Storacha
+
+Storacha is a decentralized storage network built on IPFS and UCAN. Each agent (coordinator and each worker) holds a sovereign `did:key` identity and a UCAN delegation that grants it upload rights to a designated space.
+
+The coordinator's Storacha client is initialized from two environment variables:
+
+```typescript
+// coordinator-agent/src/storacha/identity.ts
+const signer = Signer.parse(process.env.STORACHA_AGENT_PRIVATE_KEY); // Ed25519 key
+const proof  = await Proof.parse(process.env.STORACHA_DELEGATION_PROOF); // UCAN CAR
+const space  = await client.addSpace(proof);
+await client.setCurrentSpace(space.did());
+```
+
+Uploads return a **CID** — a content-addressed identifier that is stable regardless of where the data is stored. The CID can be used to verify the transcript's integrity at any future point.
+
+### Lit Protocol threshold encryption
+
+Before any data reaches Storacha, it is encrypted using [Lit Protocol](https://litprotocol.com/). Lit distributes encryption key shares across its node network. Decryption requires collecting a threshold of shares — no single node or key holder can decrypt alone.
+
+The `@storacha/encrypt-upload-client` library integrates the two systems through a generic Lit crypto adapter:
+
+```typescript
+// coordinator-agent/src/storacha/vault.ts
+const cryptoAdapter = createGenericLitAdapter(litClient, authManager);
+
+const encryptedClient = await eucCreate({
+  storachaClient,
+  cryptoAdapter,
+  gatewayURL: new URL('https://storacha.link'),
+});
+
+// Encrypts with Lit threshold keys, uploads to Storacha in one call
+const cid = await encryptedClient.encryptAndUploadFile(blob, encryptionConfig);
+```
+
+Access control is defined by a Lit Access Control Condition (ACC) attached to each ciphertext. You configure this condition to allow decryption only by wallets that satisfy a specific on-chain rule — for example, holding a DAO governance token.
+
+<Tip>
+  Storacha retrieval automatically falls back through multiple IPFS gateways (`storacha.link` → `w3s.link` → `dweb.link` → `ipfs.io`) with retry logic, so transcript access is resilient to individual gateway outages.
+</Tip>
+
+### What gets backed up
+
+The coordinator triggers two Storacha uploads after each completed proposal:
+
+1. **Deliberation backup** — the `TallyResult` for the specific proposal, stored as `deliberation-{proposalId}.json`
+2. **Ensue tree backup** — a full serialized snapshot of all `coordination/` keys from Ensue at the time of completion
+
+Both uploads happen asynchronously after `resume_with_result` succeeds, so they do not block on-chain settlement.
+
+## Cold tier: Filecoin (Proof of Spacetime)
+
+Every CID returned by a Storacha upload is automatically queued for a Filecoin storage deal. Storacha handles deal negotiation with Filecoin storage providers on your behalf.
+
+Filecoin uses **Proof of Spacetime** (PoSt) — storage providers must continually prove they are still storing your data, making Filecoin deals cryptographically verifiable and economically incentivized to persist.
+
+The coordinator logs each archival event:
+
+```typescript
+// coordinator-agent/src/monitor/memory-monitor.ts
+backupDeliberation(proposalId, taskConfig, tally).then(cid => {
+  if (cid) {
+    archiveCID(cid).then(record => {
+      // record.status, record.dealReference (e.g. 'fil-f3cac8e5...')
+      logArchivalToNear(record, proposalId);
+    });
+  }
+});
+```
+
+Archival records (deal references and CIDs) are logged back to NEAR for auditability.
+
+## End-to-end data flow
+
+The journey from a completed vote to permanent cold storage:
+
+<Steps>
+  <Step title="Vote complete">
+    All workers have written `completed` status and their `WorkerResult` JSON to Ensue. The coordinator reads and tallies the votes.
+  </Step>
+  <Step title="Lit encrypt">
+    The coordinator serializes the full `TallyResult` to JSON and passes it to the `encryptAndUploadFile` call. Lit Protocol encrypts the payload using threshold key shares bound to an Access Control Condition.
+  </Step>
+  <Step title="Storacha upload">
+    The encrypted blob is uploaded to Storacha. The client returns a CID — a content-addressed, immutable reference to the encrypted transcript.
+  </Step>
+  <Step title="Automatic Filecoin deal">
+    Storacha automatically negotiates a Filecoin storage deal for the uploaded CID. The deal reference (e.g. `fil-f3cac8e5...`) is returned and logged.
+  </Step>
+  <Step title="CID returned">
+    The CID is stored in the coordinator's logs and in the NEAR archival record. Anyone can verify the transcript exists on Filecoin; only wallets satisfying the ACC can decrypt it.
+  </Step>
+</Steps>
+
+<Warning>
+  Storacha and Filecoin archival are non-blocking and non-fatal. If the vault is not configured (`STORACHA_AGENT_PRIVATE_KEY` or `STORACHA_DELEGATION_PROOF` is missing), the coordinator skips backup and logs a warning. On-chain settlement always proceeds regardless of storage tier availability.
+</Warning>

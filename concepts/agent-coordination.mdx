@@ -1,0 +1,171 @@
+---
+title: "Agent coordination"
+description: "How the coordinator and worker agents communicate through Ensue shared memory to reach a verifiable on-chain decision."
+---
+
+Delibera uses a two-tier agent architecture. A single **coordinator agent** orchestrates the process: it reads proposals from the NEAR contract, dispatches them to worker agents, collects the results, and settles the outcome on-chain. Multiple independent **worker agents** each deliberate in isolation and write their votes to shared memory.
+
+The coordination layer between them is [Ensue Memory Network](https://ensue.dev) — a private, off-chain key-value store that all agents share.
+
+## Coordinator-worker architecture
+
+<CardGroup cols={2}>
+  <Card title="Coordinator agent" icon="tower-control">
+    Runs at port 3000. Polls the NEAR contract for pending proposals, dispatches tasks to workers, monitors completion, tallies votes, and calls `resume_with_result` to settle the decision on-chain. Backs up transcripts to Storacha.
+  </Card>
+  <Card title="Worker agents" icon="robot">
+    Each runs at a separate port (3001–300N). Fetches the DAO manifesto, loads its persistent agent identity, calls NEAR AI (DeepSeek-V3.1) to deliberate, then writes its vote and reasoning to Ensue. Runs as an independent process with its own `did:key` identity.
+  </Card>
+</CardGroup>
+
+## Ensue shared memory as the coordination layer
+
+All inter-agent state flows through Ensue key-value paths. No direct agent-to-agent network calls are made during deliberation — workers write to Ensue, and the coordinator reads from it.
+
+### Memory key structure
+
+```
+coordination/
+├── coordinator/
+│   ├── status              ← CoordinatorStatus (idle | monitoring | aggregating | resuming | completed | failed)
+│   ├── tally               ← TallyResult JSON (full detail — coordinator eyes only)
+│   └── proposal_id         ← current proposal being processed
+├── tasks/
+│   └── {workerId}/
+│       ├── status          ← TaskStatus (idle | pending | processing | completed | failed)
+│       ├── result          ← WorkerResult JSON (vote + reasoning)
+│       ├── timestamp       ← ISO timestamp of completion
+│       ├── error           ← error message if failed
+│       └── verification_proof ← NEAR AI VerificationProof JSON
+├── proposals/
+│   └── {proposalId}/
+│       ├── config          ← archived task definition
+│       ├── status          ← created | completed | failed
+│       ├── tally           ← archived aggregate result
+│       └── workers/
+│           └── {workerId}/
+│               ├── result      ← archived per-worker decision
+│               └── timestamp
+└── config/
+    ├── task_definition     ← current task config written by coordinator
+    └── contract_address    ← NEAR contract address
+```
+
+These paths come directly from `shared/src/constants.ts`:
+
+```typescript
+export const MEMORY_KEYS = {
+  COORDINATOR_TALLY:      'coordination/coordinator/tally',
+  COORDINATOR_STATUS:     'coordination/coordinator/status',
+  COORDINATOR_PROPOSAL_ID:'coordination/coordinator/proposal_id',
+  CONFIG_TASK_DEFINITION: 'coordination/config/task_definition',
+  CONFIG_CONTRACT_ADDRESS:'coordination/config/contract_address',
+} as const;
+
+export function getWorkerKeys(workerId: string) {
+  return {
+    STATUS:             `coordination/tasks/${workerId}/status`,
+    RESULT:             `coordination/tasks/${workerId}/result`,
+    TIMESTAMP:          `coordination/tasks/${workerId}/timestamp`,
+    ERROR:              `coordination/tasks/${workerId}/error`,
+    VERIFICATION_PROOF: `coordination/tasks/${workerId}/verification_proof`,
+  };
+}
+```
+
+### Ephemeral vs archived keys
+
+Keys under `coordination/tasks/{workerId}/` are **ephemeral**: they are overwritten at the start of every new proposal round. Once the coordinator tallies results, it copies them to the archived path under `coordination/proposals/{proposalId}/workers/{workerId}/` for persistent history.
+
+## The NEAR yield/resume pattern
+
+The NEAR coordinator contract uses a *yielded promise* to pause execution while waiting for the off-chain result.
+
+1. A user calls `submit_proposal` on the contract. The contract creates a yielded promise and returns a `yield_id` — execution is suspended.
+2. The coordinator agent detects the pending proposal via Ensue polling (every 5 seconds by default).
+3. After workers complete and the tally is computed, the coordinator calls `resume_with_result`, passing the `OnChainResult` and a result hash.
+4. The contract resumes the promise, validates the hash, and stores the final decision.
+
+<Warning>
+  Only the coordinator agent can call `resume_with_result`. In production, the coordinator runs inside a Phala TEE and holds the NEAR account key — no other party can settle a proposal.
+</Warning>
+
+## Proposal lifecycle states
+
+Every proposal moves through a defined set of states, matching the contract's `ProposalState` enum:
+
+```typescript
+// shared/src/types.ts
+export type ProposalState = 'Created' | 'WorkersCompleted' | 'Finalized' | 'TimedOut';
+```
+
+<Steps>
+  <Step title="Created">
+    A DAO member calls `submit_proposal`. The contract creates the proposal with state `Created` and suspends execution via a yielded promise. The coordinator detects this state during its polling loop.
+  </Step>
+  <Step title="WorkersCompleted">
+    All worker agents have written `completed` status to their Ensue keys. The coordinator reads this from Ensue — the contract state transitions after the coordinator records worker submission hashes on-chain via `record_worker_submissions`.
+  </Step>
+  <Step title="Finalized">
+    The coordinator calls `resume_with_result`. The NEAR contract resumes, validates the result hash, and transitions the proposal to `Finalized`. The aggregate decision is now public on-chain.
+  </Step>
+  <Step title="TimedOut">
+    If the coordinator does not call `resume_with_result` before the proposal's deadline, the contract moves the proposal to `TimedOut`. The yielded promise expires and no result is recorded.
+  </Step>
+</Steps>
+
+## Coordination flow
+
+The full lifecycle from proposal submission to on-chain settlement:
+
+<Steps>
+  <Step title="Dispatch">
+    The coordinator writes the task config to `coordination/config/task_definition` and sets each worker's status key to `pending`. In local mode it also POSTs to each worker's `/api/task/execute` endpoint directly.
+  </Step>
+  <Step title="Deliberate">
+    Each worker agent picks up the task, fetches the DAO manifesto from the NEAR contract, loads its persistent identity context, and calls NEAR AI. On completion it writes its `WorkerResult` to `coordination/tasks/{workerId}/result` and sets status to `completed`.
+  </Step>
+  <Step title="Tally">
+    The coordinator polls all worker status keys every second. Once all workers show `completed` (or `failed`), it reads all result keys and tallies the votes. A strict majority (or a configurable quorum) determines the outcome. The full `TallyResult` (with per-worker reasoning) is written to `coordination/coordinator/tally`.
+  </Step>
+  <Step title="Resume">
+    The coordinator strips per-worker detail, constructs an `OnChainResult`, hashes it, and calls `resume_with_result`. The NEAR contract records the decision publicly. The coordinator then backs up the full `TallyResult` to Storacha (encrypted with Lit Protocol) for permanent archival.
+  </Step>
+</Steps>
+
+## Worker discovery
+
+The coordinator finds its workers through two mechanisms, tried in order:
+
+<Tabs>
+  <Tab title="Registry contract (primary)">
+    The NEAR registry contract (`registry.agents-coordinator.testnet`) stores all registered coordinators and workers with their endpoint URLs and Phala CVM IDs. The coordinator queries `get_workers_for_coordinator` at vote start, passing its own `did:key` DID.
+
+    ```typescript
+    // coordinator-agent/src/monitor/memory-monitor.ts
+    const workers = await localViewRegistry<WorkerRecord[]>(
+      'get_workers_for_coordinator',
+      { coordinator_did: coordinatorDID },
+    );
+    ```
+
+    Only workers with `is_active: true` participate in the vote. The coordinator takes a snapshot of this list at the moment the vote starts and stores it under `coordination/coordinator/worker_snapshot_{proposalId}` — mid-vote registration changes do not affect the current round.
+  </Tab>
+  <Tab title="WORKERS env (fallback)">
+    If the registry is unavailable or returns an empty list, the coordinator falls back to the `WORKERS` environment variable.
+
+    ```bash
+    # Simple format: id:port
+    WORKERS=worker1:3001,worker2:3002,worker3:3003
+
+    # URL format (for remote workers)
+    WORKERS=worker1|https://worker1.example.com,worker2|https://worker2.example.com
+    ```
+
+    This fallback is used in local development and for backward compatibility.
+  </Tab>
+</Tabs>
+
+<Tip>
+  The coordinator also resolves human-readable display names for worker DIDs using the `NameResolver` helper. This map is stored in `TallyResult.workerNames` and shown in the dashboard — it never reaches the blockchain.
+</Tip>

@@ -1,0 +1,117 @@
+---
+title: "Execute a task"
+description: "Dispatch a task to a worker agent for AI deliberation and voting"
+---
+
+## POST /api/task/execute
+
+Instructs the worker agent to execute a task — typically an AI voting deliberation on a proposal. The task runs asynchronously; this endpoint returns immediately after starting the task.
+
+The worker calls NEAR AI (DeepSeek-V3.1), receives a TEE-signed verification proof, and writes its vote and reasoning to Ensue shared memory. Results are never returned in the HTTP response — they are stored privately in Ensue.
+
+```bash
+curl -X POST http://localhost:3001/api/task/execute \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "taskConfig": {
+      "type": "vote",
+      "parameters": {
+        "proposal": "Fund a developer grant program for 10,000 NEAR"
+      },
+      "timeout": 30000
+    }
+  }'
+```
+
+<Note>
+  The coordinator agent calls this endpoint automatically for each worker during a coordination round. You typically do not need to call it directly.
+</Note>
+
+### Request body
+
+<ParamField body="taskConfig" type="TaskConfig" required>
+  Configuration for the task to execute
+
+  <Expandable title="TaskConfig fields">
+    <ParamField body="type" type="string" required>
+      Task type. Use `vote` for AI deliberation voting.
+    </ParamField>
+    <ParamField body="parameters" type="object">
+      Task parameters
+      <Expandable title="parameters fields">
+        <ParamField body="proposal" type="string">
+          The proposal text for the AI to deliberate on
+        </ParamField>
+      </Expandable>
+    </ParamField>
+    <ParamField body="timeout" type="number">
+      Execution timeout in milliseconds
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+### Response fields
+
+<ResponseField name="message" type="string">
+  Always `Task started` on success
+</ResponseField>
+
+<ResponseField name="worker" type="string">
+  The worker ID (e.g., `worker1`, `worker2`, `worker3`)
+</ResponseField>
+
+<ResponseField name="taskType" type="string">
+  The task type from the request config
+</ResponseField>
+
+### Example response
+
+```json
+{
+  "message": "Task started",
+  "worker": "worker1",
+  "taskType": "vote"
+}
+```
+
+### Error response
+
+```json
+// 400: Missing taskConfig
+{ "error": "taskConfig is required" }
+
+// 500: Execution failed
+{
+  "error": "Failed to start task",
+  "details": "NEAR AI connection timeout"
+}
+```
+
+---
+
+## GET /api/task/status
+
+Returns the worker's current task status from Ensue.
+
+```bash
+curl http://localhost:3001/api/task/status
+```
+
+### Response fields
+
+<ResponseField name="status" type="string">
+  Current task status: `idle`, `working`, `completed`, or `error`
+</ResponseField>
+
+<ResponseField name="timestamp" type="number">
+  Unix timestamp of the last status update (optional)
+</ResponseField>
+
+### Example response
+
+```json
+{
+  "status": "idle",
+  "timestamp": 1705312200000
+}
+```

@@ -1,122 +1,117 @@
 {
   "$schema": "https://mintlify.com/docs.json",
-  "theme": "mint",
-  "name": "Mint Starter Kit",
+  "name": "Delibera",
+  "theme": "aspen",
   "colors": {
-    "primary": "#16A34A",
-    "light": "#07C983",
-    "dark": "#15803D"
+    "primary": "#04f742",
+    "light": "#044514",
+    "dark": "#040404"
   },
   "favicon": "/favicon.svg",
+  "logo": {
+    "light": "https://media.brand.dev/6902dbd5-26f7-4754-a206-841412175b6c.svg",
+    "dark": "https://media.brand.dev/907e6c38-dbf5-4e79-86f9-f4dd50c48201.svg"
+  },
+  "navbar": {
+    "primary": {
+      "type": "github",
+      "href": "https://github.com/leomanza/near-shade-coordination"
+    }
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/leomanza/near-shade-coordination"
+    }
+  },
   "navigation": {
     "tabs": [
       {
-        "tab": "Guides",
+        "tab": "Documentation",
         "groups": [
           {
-            "group": "Getting started",
+            "group": "Overview",
+            "pages": ["introduction", "how-it-works", "architecture"]
+          },
+          {
+            "group": "Getting Started",
+            "pages": ["quickstart", "prerequisites", "configuration"]
+          },
+          {
+            "group": "Core Concepts",
             "pages": [
-              "index",
-              "quickstart",
-              "development"
+              "concepts/privacy-model",
+              "concepts/agent-coordination",
+              "concepts/tiered-storage",
+              "concepts/tee-attestation"
             ]
           },
           {
-            "group": "Customization",
+            "group": "Agents",
             "pages": [
-              "essentials/settings",
-              "essentials/navigation"
+              "agents/coordinator-agent",
+              "agents/worker-agent",
+              "agents/agent-identity"
             ]
           },
           {
-            "group": "Writing content",
+            "group": "Smart Contracts",
             "pages": [
-              "essentials/markdown",
-              "essentials/code",
-              "essentials/images",
-              "essentials/reusable-snippets"
+              "contracts/coordinator-contract",
+              "contracts/registry-contract",
+              "contracts/fhe-voting-contract"
             ]
           },
           {
-            "group": "AI tools",
+            "group": "Integrations",
             "pages": [
-              "ai-tools/cursor",
-              "ai-tools/claude-code",
-              "ai-tools/windsurf"
+              "integrations/near-ai",
+              "integrations/ensue-memory",
+              "integrations/storacha-filecoin",
+              "integrations/lit-protocol",
+              "integrations/flow-vrf",
+              "integrations/phala-tee"
+            ]
+          },
+          {
+            "group": "Deployment",
+            "pages": [
+              "deployment/local-development",
+              "deployment/production-tee",
+              "deployment/testnet-contracts"
             ]
           }
         ]
       },
       {
-        "tab": "API reference",
+        "tab": "API Reference",
         "groups": [
           {
-            "group": "API documentation",
+            "group": "Coordinator Agent API",
             "pages": [
-              "api-reference/introduction"
+              "api/coordinator/status",
+              "api/coordinator/workers",
+              "api/coordinator/trigger",
+              "api/coordinator/proposals",
+              "api/coordinator/jury"
             ]
           },
           {
-            "group": "Endpoint examples",
+            "group": "Worker Agent API",
             "pages": [
-              "api-reference/endpoint/get",
-              "api-reference/endpoint/create",
-              "api-reference/endpoint/delete",
-              "api-reference/endpoint/webhook"
+              "api/worker/execute",
+              "api/worker/identity",
+              "api/worker/health"
+            ]
+          },
+          {
+            "group": "Smart Contract Methods",
+            "pages": [
+              "api/contracts/coordinator-methods",
+              "api/contracts/registry-methods"
             ]
           }
         ]
       }
-    ],
-    "global": {
-      "anchors": [
-        {
-          "anchor": "Documentation",
-          "href": "https://mintlify.com/docs",
-          "icon": "book-open-cover"
-        },
-        {
-          "anchor": "Blog",
-          "href": "https://mintlify.com/blog",
-          "icon": "newspaper"
-        }
-      ]
-    }
-  },
-  "logo": {
-    "light": "/logo/light.svg",
-    "dark": "/logo/dark.svg"
-  },
-  "navbar": {
-    "links": [
-      {
-        "label": "Support",
-        "href": "mailto:hi@mintlify.com"
-      }
-    ],
-    "primary": {
-      "type": "button",
-      "label": "Dashboard",
-      "href": "https://dashboard.mintlify.com"
-    }
-  },
-  "contextual": {
-    "options": [
-     "copy",
-     "view",
-     "chatgpt",
-     "claude",
-     "perplexity",
-     "mcp",
-     "cursor",
-     "vscode"
-   ]
-  },
-  "footer": {
-    "socials": {
-      "x": "https://x.com/mintlify",
-      "github": "https://github.com/mintlify",
-      "linkedin": "https://linkedin.com/company/mintlify"
-    }
+    ]
   }
 }

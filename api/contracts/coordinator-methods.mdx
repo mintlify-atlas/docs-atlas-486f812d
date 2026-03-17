@@ -1,0 +1,273 @@
+---
+title: "Coordinator contract methods"
+description: "Full reference for all Coordinator Contract methods on NEAR testnet"
+---
+
+**Contract address:** `coordinator.agents-coordinator.testnet`
+
+The Coordinator Contract manages the proposal lifecycle using NEAR's yield/resume async pattern. It stores the DAO manifesto, tracks proposal states, records worker nullifiers, and settles aggregate tallies on-chain.
+
+## Change methods
+
+### `start_coordination`
+
+Creates a new proposal and a yielded NEAR promise that pauses execution until the coordinator agent resumes it with the aggregate result.
+
+```bash
+near call coordinator.agents-coordinator.testnet start_coordination \
+  '{"task_config": "{\"type\":\"vote\",\"parameters\":{\"proposal\":\"Fund a grant\"}}", "expected_worker_count": 3, "quorum": 2}' \
+  --accountId your-account.testnet
+```
+
+<ParamField path="task_config" type="string" required>
+  JSON-serialized task configuration (max 10,000 characters). The coordinator agent dispatches this to workers.
+</ParamField>
+
+<ParamField path="expected_worker_count" type="u8" required>
+  Number of worker agents expected to submit results. Must exactly match the submissions in `record_worker_submissions`.
+</ParamField>
+
+<ParamField path="quorum" type="u8" required>
+  Minimum number of agreeing votes required for a decision (future enforcement).
+</ParamField>
+
+**Returns:** `u64` — the new proposal ID
+
+<Note>
+  The manifesto must be set via `set_manifesto` before you can call `start_coordination`.
+</Note>
+
+---
+
+### `record_worker_submissions`
+
+Records worker nullifiers on-chain. Each entry proves a worker participated without revealing the vote. The submission count must exactly match `expected_worker_count`.
+
+```bash
+near call coordinator.agents-coordinator.testnet record_worker_submissions \
+  '{"proposal_id": 1, "submissions": [{"worker_id": "did:key:z6Mk...", "result_hash": "sha256hash"}]}' \
+  --accountId coordinator-account.testnet
+```
+
+<ParamField path="proposal_id" type="u64" required>
+  The ID of the proposal to record submissions for. Must be in `Created` state.
+</ParamField>
+
+<ParamField path="submissions" type="WorkerSubmissionInput[]" required>
+  Array of worker nullifiers. Length must equal `expected_worker_count`.
+
+  <Expandable title="WorkerSubmissionInput fields">
+    <ParamField path="worker_id" type="string" required>
+      The worker's DID or identifier
+    </ParamField>
+    <ParamField path="result_hash" type="string" required>
+      SHA-256 hash of the worker's result (nullifier — proves participation without revealing vote)
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+**Requires:** Caller must be a registered coordinator with an approved codehash.
+
+---
+
+### `coordinator_resume`
+
+Resumes the yielded promise with the aggregate vote tally, settling the result on-chain. The proposal transitions from `WorkersCompleted` to `Finalized`.
+
+```bash
+near call coordinator.agents-coordinator.testnet coordinator_resume \
+  '{"proposal_id": 1, "aggregated_result": "{\"approved\":2,\"rejected\":1,\"decision\":\"Approved\"}", "config_hash": "abc123", "result_hash": "def456"}' \
+  --accountId coordinator-account.testnet
+```
+
+<ParamField path="proposal_id" type="u64" required>
+  The proposal ID to resume. Must be in `WorkersCompleted` state.
+</ParamField>
+
+<ParamField path="aggregated_result" type="string" required>
+  JSON-serialized aggregate tally (only public counts — no individual reasoning).
+</ParamField>
+
+<ParamField path="config_hash" type="string" required>
+  SHA-256 hash of the original `task_config`. Used to verify the config was not tampered with.
+</ParamField>
+
+<ParamField path="result_hash" type="string" required>
+  SHA-256 hash of `aggregated_result`. Verified on-chain for result integrity.
+</ParamField>
+
+**Requires:** Caller must be a registered coordinator with an approved codehash.
+
+---
+
+### `set_manifesto`
+
+Sets the DAO manifesto text that guides all AI agent voting decisions. Owner only.
+
+```bash
+near call coordinator.agents-coordinator.testnet set_manifesto \
+  '{"manifesto_text": "We fund public goods that advance the NEAR ecosystem."}' \
+  --accountId agents-coordinator.testnet
+```
+
+<ParamField path="manifesto_text" type="string" required>
+  The manifesto text (max 10,000 characters)
+</ParamField>
+
+**Requires:** Owner only.
+
+---
+
+### `register_worker`
+
+Registers a worker agent that can participate in governance voting.
+
+```bash
+near call coordinator.agents-coordinator.testnet register_worker \
+  '{"worker_id": "did:key:z6MkWorker1", "account_id": "worker1.testnet"}' \
+  --accountId agents-coordinator.testnet
+```
+
+<ParamField path="worker_id" type="string" required>
+  The worker's identifier (DID recommended)
+</ParamField>
+
+<ParamField path="account_id" type="string">
+  Optional NEAR account ID associated with the worker
+</ParamField>
+
+**Requires:** Owner or registered coordinator.
+
+---
+
+### `approve_codehash`
+
+Approves a coordinator codehash, allowing coordinators with that codehash to call change methods. Owner only.
+
+```bash
+near call coordinator.agents-coordinator.testnet approve_codehash \
+  '{"codehash": "sha256ofcoordinatorwasm"}' \
+  --accountId agents-coordinator.testnet
+```
+
+---
+
+### `register_coordinator`
+
+Registers a coordinator agent account with an approved codehash. Owner only.
+
+```bash
+near call coordinator.agents-coordinator.testnet register_coordinator \
+  '{"checksum": "checksum123", "codehash": "sha256ofcoordinatorwasm"}' \
+  --accountId coordinator-account.testnet
+```
+
+---
+
+## View methods
+
+### `get_manifesto`
+
+Returns the current DAO manifesto.
+
+```bash
+near view coordinator.agents-coordinator.testnet get_manifesto '{}'
+```
+
+**Returns:** `{ text: string, hash: string } | null`
+
+---
+
+### `get_proposal`
+
+Returns a single proposal by ID.
+
+```bash
+near view coordinator.agents-coordinator.testnet get_proposal '{"proposal_id": 1}'
+```
+
+**Returns:** `Proposal | null`
+
+---
+
+### `get_all_proposals`
+
+Lists all proposals with optional pagination.
+
+```bash
+near view coordinator.agents-coordinator.testnet get_all_proposals \
+  '{"from_index": 0, "limit": 10}'
+```
+
+<ParamField path="from_index" type="u64">
+  Start from this proposal ID (inclusive). Defaults to `0`.
+</ParamField>
+
+<ParamField path="limit" type="u64">
+  Maximum number of proposals to return. Defaults to all proposals.
+</ParamField>
+
+**Returns:** `[u64, Proposal][]` — array of (id, proposal) pairs
+
+---
+
+### `get_proposals_by_state`
+
+Filters proposals by lifecycle state.
+
+```bash
+near view coordinator.agents-coordinator.testnet get_proposals_by_state \
+  '{"state": "Finalized", "from_index": null, "limit": null}'
+```
+
+**State values:** `Created` | `WorkersCompleted` | `Finalized` | `TimedOut`
+
+---
+
+### `get_worker_submissions`
+
+Returns on-chain nullifier records for a proposal.
+
+```bash
+near view coordinator.agents-coordinator.testnet get_worker_submissions '{"proposal_id": 1}'
+```
+
+**Returns:** `WorkerSubmission[]` — each has `worker_id`, `result_hash`, `timestamp`
+
+---
+
+### `get_pending_coordinations`
+
+Lists proposals in `Created` state (pending coordinator pickup).
+
+```bash
+near view coordinator.agents-coordinator.testnet get_pending_coordinations \
+  '{"from_index": null, "limit": null}'
+```
+
+---
+
+### `get_active_workers`
+
+Lists all active registered workers.
+
+```bash
+near view coordinator.agents-coordinator.testnet get_active_workers '{}'
+```
+
+---
+
+## Proposal struct fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `yield_id` | `CryptoHash` | NEAR yield ID for the suspended promise |
+| `task_config` | `string` | Submitted task configuration JSON |
+| `config_hash` | `string` | SHA-256 of `task_config` (tamper detection) |
+| `timestamp` | `u64` | NEAR block timestamp when created |
+| `requester` | `AccountId` | NEAR account that submitted the proposal |
+| `state` | `ProposalState` | Current lifecycle state |
+| `expected_worker_count` | `u8` | Required number of worker submissions |
+| `quorum` | `u8` | Minimum agreeing votes for a decision |
+| `worker_submissions` | `WorkerSubmission[]` | On-chain nullifier records |
+| `finalized_result` | `string?` | Serialized aggregate result (once finalized) |

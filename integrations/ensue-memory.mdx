@@ -1,0 +1,212 @@
+---
+title: 'Ensue Memory Network'
+description: 'JSON-RPC 2.0 over SSE key-value memory that serves as the hot coordination layer between coordinator and worker agents.'
+keywords: ['Ensue', 'memory', 'coordination', 'JSON-RPC', 'SSE', 'shared memory']
+---
+
+Ensue is the **hot coordination layer** of Delibera. While NEAR handles on-chain settlement and Storacha handles persistent encrypted storage, Ensue holds the real-time coordination state: worker statuses, vote results, verification proofs, and proposal tallies — all private and off-chain.
+
+## Protocol
+
+Ensue uses JSON-RPC 2.0 delivered over Server-Sent Events (SSE). Every operation is a `POST` to `https://api.ensue-network.ai/` with a `tools/call` method body. Responses arrive as `data: {json}\n\n` event-stream lines — the client reads the last `data:` line as the final result.
+
+```typescript
+// All requests use this envelope
+{
+  jsonrpc: '2.0',
+  method: 'tools/call',
+  params: {
+    name: 'create_memory' | 'get_memory' | 'update_memory' | 'delete_memory' | 'list_keys' | 'search_memories',
+    arguments: { /* method-specific args */ },
+  },
+  id: 1,
+}
+```
+
+## Authentication
+
+Set either `ENSUE_API_KEY` or `ENSUE_TOKEN` in every agent's environment. The `createEnsueClient()` factory checks both:
+
+```bash
+ENSUE_API_KEY=your-ensue-api-key
+ENSUE_TOKEN=your-ensue-api-key   # alias — same value
+```
+
+<Info>
+Get an Ensue API key at [ensue.dev](https://ensue.dev).
+</Info>
+
+## EnsueClient API
+
+The shared library exports `EnsueClient` and a `createEnsueClient()` factory. Every agent imports from `@near-shade-coordination/shared`.
+
+```typescript
+import { createEnsueClient } from '@near-shade-coordination/shared';
+
+const ensue = createEnsueClient(); // reads ENSUE_API_KEY or ENSUE_TOKEN from env
+```
+
+### Core operations
+
+```typescript
+// Write a new key
+await ensue.createMemory('coordination/coordinator/status', 'monitoring');
+
+// Read a key (returns null if missing)
+const status = await ensue.readMemory('coordination/coordinator/status');
+
+// Read multiple keys in one call
+const values = await ensue.readMultiple([
+  'coordination/coordinator/status',
+  'coordination/coordinator/tally',
+]);
+
+// Update an existing key (falls back to create if not found)
+await ensue.updateMemory('coordination/tasks/worker1/status', 'completed');
+
+// Delete a key
+await ensue.deleteMemory('coordination/tasks/worker1/error');
+
+// List keys by prefix
+const keys = await ensue.listKeys('coordination/tasks/');
+
+// Semantic search across all memories
+const results = await ensue.searchMemories('vote rejected proposal', 5);
+
+// Clear all keys with a given prefix (for reset)
+await ensue.clearPrefix('coordination/');
+```
+
+## Memory key hierarchy
+
+Every key lives under the `coordination/` namespace. The hierarchy separates ephemeral per-round state from persistent proposal archives.
+
+```
+coordination/
+├── coordinator/
+│   ├── status              ← CoordinatorStatus: idle | monitoring | aggregating | resuming | completed | failed
+│   ├── tally               ← JSON TallyResult (full detail, private)
+│   └── proposal_id         ← number of the active proposal
+├── tasks/
+│   └── {workerId}/
+│       ├── status          ← TaskStatus: idle | pending | processing | completed | failed
+│       ├── result          ← JSON WorkerResult
+│       ├── timestamp       ← ISO string
+│       ├── error           ← error message string (if failed)
+│       └── verification_proof  ← JSON VerificationProof
+├── proposals/
+│   └── {proposalId}/
+│       ├── config          ← archived task definition
+│       ├── status          ← created | completed | failed
+│       ├── tally           ← aggregate result
+│       └── workers/
+│           └── {workerId}/
+│               ├── result      ← archived per-worker decision
+│               └── timestamp
+├── agents/
+│   └── {agentId}/
+│       ├── endpoint        ← HTTP URL for this agent
+│       ├── type            ← 'coordinator' | 'worker'
+│       ├── cvm_id          ← Phala CVM container ID
+│       ├── dashboard_url
+│       └── updated_at
+├── config/
+│   ├── task_definition
+│   └── contract_address
+└── archival/
+    └── {proposalId}        ← Filecoin deal reference after backup
+```
+
+### Key helper functions
+
+The `constants.ts` module exports typed helpers so you never hard-code key strings:
+
+```typescript
+import {
+  MEMORY_KEYS,
+  getWorkerKeys,
+  getProposalKeys,
+  getProposalWorkerKeys,
+  getAgentRegistryKeys,
+  getCoordinatorSnapshotKey,
+  PROPOSAL_INDEX_KEY,
+} from '@near-shade-coordination/shared';
+
+// Coordinator ephemeral keys
+MEMORY_KEYS.COORDINATOR_STATUS      // 'coordination/coordinator/status'
+MEMORY_KEYS.COORDINATOR_TALLY       // 'coordination/coordinator/tally'
+MEMORY_KEYS.COORDINATOR_PROPOSAL_ID // 'coordination/coordinator/proposal_id'
+
+// Worker ephemeral keys (overwritten each round)
+const wk = getWorkerKeys('worker1');
+wk.STATUS             // 'coordination/tasks/worker1/status'
+wk.RESULT             // 'coordination/tasks/worker1/result'
+wk.VERIFICATION_PROOF // 'coordination/tasks/worker1/verification_proof'
+
+// Archived proposal keys
+const pk = getProposalKeys('42');
+pk.STATUS // 'coordination/proposals/42/status'
+pk.TALLY  // 'coordination/proposals/42/tally'
+
+// Worker snapshot at vote start (prevents mid-vote registration from skewing count)
+const snapshotKey = getCoordinatorSnapshotKey(42);
+// 'coordination/coordinator/worker_snapshot_42'
+```
+
+## Coordination flow
+
+### Coordinator polling
+
+The coordinator's monitor loop polls Ensue every few seconds to check whether all workers in the snapshot have completed:
+
+<Steps>
+  <Step title="Read coordinator status">
+    The monitor reads `coordination/coordinator/status`. If it is `monitoring`, an active round is in progress.
+  </Step>
+  <Step title="Read worker snapshot">
+    Load `coordination/coordinator/worker_snapshot_{proposalId}` to get the list of worker DIDs that were registered when the vote started.
+  </Step>
+  <Step title="Poll worker statuses">
+    Read all `coordination/tasks/{workerId}/status` keys in a single `readMultiple` call. When all are `completed`, move to aggregation.
+  </Step>
+  <Step title="Read results and tally">
+    Load each `coordination/tasks/{workerId}/result` and build the aggregate. Write the tally to `coordination/coordinator/tally` and update status to `aggregating`.
+  </Step>
+  <Step title="Resume on-chain and archive">
+    After the NEAR contract call succeeds, write the archived tally to `coordination/proposals/{id}/tally` and set coordinator status to `completed`.
+  </Step>
+</Steps>
+
+### Worker status lifecycle
+
+Each worker updates its own status key as it processes a task:
+
+| Status | When set |
+|--------|----------|
+| `idle` | Worker is ready, waiting for tasks |
+| `pending` | Task received, not yet started |
+| `processing` | Actively calling NEAR AI |
+| `completed` | Vote written to Ensue, ready for coordinator to read |
+| `failed` | Error occurred; error message is in the `error` key |
+
+## Memory reset
+
+To reset ephemeral coordination state between rounds (or to clear stale data during development), call `clearPrefix` on the `coordination/tasks/` namespace:
+
+```typescript
+// Reset all worker task state
+await ensue.clearPrefix('coordination/tasks/');
+
+// Reset the entire coordination namespace (wipes everything including archives)
+await ensue.clearPrefix('coordination/');
+```
+
+You can also trigger a reset via the coordinator API:
+
+```bash
+curl -X POST http://localhost:3000/api/coordinate/reset
+```
+
+<Warning>
+`clearPrefix('coordination/')` deletes proposal history and archives stored in Ensue. Storacha backups (if configured) are unaffected because they are stored as IPFS CIDs.
+</Warning>

@@ -1,0 +1,122 @@
+---
+title: "Worker management"
+description: "List worker statuses and manage worker display names"
+---
+
+## GET /api/coordinate/workers
+
+Returns the current status of all workers associated with this coordinator. Worker discovery uses the NEAR registry contract first, falling back to the `WORKERS` environment variable.
+
+```bash
+curl http://localhost:3000/api/coordinate/workers
+```
+
+### Response fields
+
+**Registry source** (when workers are discovered via the NEAR registry contract):
+
+<ResponseField name="workers" type="WorkerInfo[]">
+  Array of worker objects with full details
+
+  <Expandable title="WorkerInfo fields">
+    <ResponseField name="did" type="string">
+      The worker's DID (e.g., `did:key:z6Mk...`)
+    </ResponseField>
+    <ResponseField name="display_name" type="string | null">
+      Human-readable display name, if set
+    </ResponseField>
+    <ResponseField name="endpoint_url" type="string">
+      The worker's HTTP endpoint URL
+    </ResponseField>
+    <ResponseField name="is_active" type="boolean">
+      Whether the worker is active in the registry
+    </ResponseField>
+    <ResponseField name="registered_at" type="number">
+      NEAR block timestamp when the worker was registered
+    </ResponseField>
+    <ResponseField name="ensue_status" type="string">
+      Current Ensue status: `idle`, `working`, `completed`, `error`, or `offline`
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="source" type="string">
+  Discovery source: `registry` or `env_fallback`
+</ResponseField>
+
+<ResponseField name="timestamp" type="string">
+  ISO 8601 timestamp of this response
+</ResponseField>
+
+### Example response (registry source)
+
+```json
+{
+  "workers": [
+    {
+      "did": "did:key:z6MkWorker1abc",
+      "display_name": "Alpha",
+      "endpoint_url": "http://localhost:3001",
+      "is_active": true,
+      "registered_at": 1705312200000000000,
+      "ensue_status": "idle"
+    },
+    {
+      "did": "did:key:z6MkWorker2def",
+      "display_name": "Beta",
+      "endpoint_url": "http://localhost:3002",
+      "is_active": true,
+      "registered_at": 1705312200000000000,
+      "ensue_status": "working"
+    }
+  ],
+  "source": "registry",
+  "timestamp": "2025-01-15T10:30:00.000Z"
+}
+```
+
+---
+
+## PATCH /api/coordinate/workers/:did/name
+
+Sets or updates a worker's human-readable display name. The name is stored in Ensue at `agent/{did}/display_name`.
+
+```bash
+curl -X PATCH http://localhost:3000/api/coordinate/workers/did%3Akey%3Az6MkWorker1abc/name \
+  -H 'Content-Type: application/json' \
+  -d '{"name": "Alpha"}'
+```
+
+<Note>
+  URL-encode the DID when using it as a path parameter: `did:key:z6Mk...` becomes `did%3Akey%3Az6Mk...`
+</Note>
+
+### Request body
+
+<ParamField path="name" type="string" required>
+  The display name to set for the worker. Must be at least 1 character.
+</ParamField>
+
+### Response fields
+
+<ResponseField name="did" type="string">
+  The worker's DID
+</ResponseField>
+
+<ResponseField name="name" type="string">
+  The display name that was set
+</ResponseField>
+
+<ResponseField name="status" type="string">
+  Always `updated` on success
+</ResponseField>
+
+### Example response
+
+```json
+{
+  "did": "did:key:z6MkWorker1abc",
+  "name": "Alpha",
+  "status": "updated"
+}
+```

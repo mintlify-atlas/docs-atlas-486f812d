@@ -1,0 +1,238 @@
+---
+title: "Worker agent"
+description: "Receives task dispatches, calls NEAR AI to deliberate on DAO proposals, and writes encrypted vote results to Ensue shared memory."
+---
+
+A worker agent is an independent AI voter. You deploy multiple instances — each with its own sovereign `did:key` identity — and they operate in parallel, producing independent votes on every proposal. In the default setup, three worker instances run on ports `3001`, `3002`, and `3003`.
+
+Worker agents never communicate directly with each other. Each one reads the task from Ensue, deliberates privately, and writes its result back to Ensue under its own DID-keyed memory path.
+
+<Columns cols={2}>
+  <Card title="Persistent identity" icon="fingerprint">
+    Each worker derives a sovereign `did:key` from its `STORACHA_AGENT_PRIVATE_KEY`. The DID persists across restarts and is the worker's identity in every protocol layer.
+  </Card>
+  <Card title="TEE-verified AI" icon="shield-check">
+    Every vote is backed by a NEAR AI verification proof — a TEE-signed ECDSA signature over the request and response hashes, cryptographically linking the vote to a specific model run inside verified hardware.
+  </Card>
+  <Card title="Private deliberation" icon="lock">
+    Votes, reasoning, and proofs are written to Ensue only. Nothing about the individual vote touches the blockchain.
+  </Card>
+  <Card title="Self-registration" icon="plug">
+    On startup, the worker registers its DID and endpoint URL in the NEAR registry contract so the coordinator can discover it dynamically.
+  </Card>
+</Columns>
+
+## Multi-instance deployment
+
+You run the same worker codebase three times with different environment files:
+
+```bash
+# Terminal 2
+cd worker-agent && npm run dev:worker1   # PORT=3001, WORKER_ID=worker1
+
+# Terminal 3
+cd worker-agent && npm run dev:worker2   # PORT=3002, WORKER_ID=worker2
+
+# Terminal 4
+cd worker-agent && npm run dev:worker3   # PORT=3003, WORKER_ID=worker3
+```
+
+Each instance reads its own `.env.worker1.local`, `.env.worker2.local`, or `.env.worker3.local` file. The critical requirement is that each instance has a **unique** `STORACHA_AGENT_PRIVATE_KEY`. This is what gives each worker a different `did:key` and therefore separate memory paths in Ensue.
+
+```bash
+# worker-agent/.env.worker1.local
+WORKER_ID=worker1
+PORT=3001
+ENSUE_API_KEY=your-ensue-api-key
+ENSUE_TOKEN=your-ensue-token
+NEAR_API_KEY=your-near-ai-key
+NEXT_PUBLIC_contractId=coordinator.agents-coordinator.testnet
+STORACHA_AGENT_PRIVATE_KEY=MgCZG7...   # unique per worker
+STORACHA_DELEGATION_PROOF=base64...
+STORACHA_SPACE_DID=did:key:z6Mk...
+
+# Optional: set a human-readable display name in Ensue on startup
+WORKER_DISPLAY_NAME=Worker Alpha
+# For self-registration in the registry:
+REGISTRY_CONTRACT_ID=registry.agents-coordinator.testnet
+COORDINATOR_DID=did:key:z6Mk...          # the coordinator's DID
+NEAR_ACCOUNT_ID=agents-coordinator.testnet
+NEAR_SEED_PHRASE="your seed phrase"
+```
+
+## Initialization sequence
+
+When the HTTP server starts, it calls `initializeWorker()`, which:
+
+1. Derives the worker's `did:key` from `STORACHA_AGENT_PRIVATE_KEY`. Falls back to `did:local:{PORT}` if the key is not set.
+2. Writes `idle` to the DID-keyed status path in Ensue (`worker/{did}/status`).
+3. Optionally writes `WORKER_DISPLAY_NAME` to Ensue (`agent/{did}/display_name`).
+4. Self-registers in the NEAR registry contract (idempotent, non-blocking).
+5. Initialises the Storacha agent identity (loads manifesto, preferences, and decision history from Storacha).
+
+After initialization, `startWorkerPollingLoop()` begins polling Ensue every 3 s for pending tasks. This loop is the mechanism that makes workers self-trigger in Phala production mode (no coordinator HTTP call required).
+
+## AI deliberation process
+
+When the coordinator dispatches a `vote` task, the worker executes the following steps:
+
+<Steps>
+  <Step title="Fetch the DAO manifesto">
+    Calls `get_manifesto()` on the coordinator contract via NEAR RPC. The manifesto text and its SHA-256 hash are returned.
+  </Step>
+  <Step title="Load persistent agent identity">
+    Reads the agent's `AgentIdentity` from Storacha (via `loadIdentity()`). This includes the agent's manifesto (name, role, values, guidelines), voting weights, accumulated knowledge notes, and recent decision history. If loading times out (15 s), the worker continues without identity context.
+  </Step>
+  <Step title="Call NEAR AI (DeepSeek-V3.1)">
+    Sends a structured prompt to `https://cloud-api.near.ai/v1` using the OpenAI-compatible API. The model is `deepseek-ai/DeepSeek-V3.1`. The prompt contains the agent identity context, the DAO manifesto, and the proposal text. The model must call a `dao_vote` tool that returns `{ vote: 'Approved' | 'Rejected', reasoning: string }`.
+  </Step>
+  <Step title="Fetch the verification proof">
+    Requests a TEE-signed verification proof from `https://cloud-api.near.ai/v1/signature/{chatId}`. The proof contains the ECDSA signature over `request_hash:response_hash`, the signing address (unique to the model's TEE), and an optional attestation report linking the address to Intel TDX or NVIDIA hardware.
+  </Step>
+  <Step title="Write results to Ensue">
+    Writes the `WorkerResult` (including vote, reasoning, and proof) to Ensue under `worker/{did}/result` and sets `worker/{did}/status` to `completed`.
+  </Step>
+  <Step title="Record decision to Storacha">
+    Appends the decision to the agent's persistent history in Storacha, so future votes are informed by accumulated experience.
+  </Step>
+</Steps>
+
+### What goes to Ensue vs on-chain
+
+| Data | Destination | Visibility |
+|------|-------------|------------|
+| Vote (`Approved` / `Rejected`) | Ensue | Private |
+| Reasoning text | Ensue | Private |
+| NEAR AI verification proof | Ensue | Private |
+| Worker status (`idle`, `processing`, `completed`) | Ensue | Private |
+| `result_hash` (SHA-256 of the full result JSON) | NEAR blockchain | Public |
+| Aggregate tally only | NEAR blockchain | Public |
+
+No individual vote or reasoning ever reaches the blockchain. Only the SHA-256 hash of the result JSON is submitted as a nullifier to prove participation.
+
+## HTTP API
+
+### GET /api/task/health
+
+Health check for the worker agent.
+
+```bash
+curl http://localhost:3001/api/task/health
+```
+
+```json
+{
+  "healthy": true,
+  "worker": "worker1",
+  "timestamp": "2026-03-17T10:00:00.000Z"
+}
+```
+
+---
+
+### POST /api/task/execute
+
+Executes a task. The coordinator calls this endpoint in local mode to dispatch work. In Phala production, workers self-trigger from the polling loop instead, but you can also call this endpoint directly for testing.
+
+The task runs asynchronously. The endpoint returns immediately and the worker writes its result to Ensue when done.
+
+<ParamField body="taskConfig" type="object" required>
+  Task configuration.
+</ParamField>
+
+<ParamField body="taskConfig.type" type="string" required>
+  Task type. Use `"vote"` for DAO proposal voting. Also supports `"random"`, `"count"`, and `"multiply"` for testing.
+</ParamField>
+
+<ParamField body="taskConfig.parameters.proposal" type="string">
+  Proposal text (required when `type` is `"vote"`).
+</ParamField>
+
+<ParamField body="taskConfig.timeout" type="number">
+  Timeout in milliseconds.
+</ParamField>
+
+```bash
+curl -X POST http://localhost:3001/api/task/execute \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "taskConfig": {
+      "type": "vote",
+      "parameters": {
+        "proposal": "Fund a developer grant program for 10,000 NEAR"
+      }
+    }
+  }'
+```
+
+```json
+{
+  "message": "Task started",
+  "worker": "worker1",
+  "taskType": "vote"
+}
+```
+
+---
+
+### GET /api/knowledge/identity
+
+Returns the agent's current identity — its manifesto, preferences, voting weights, accumulated knowledge notes, and recent decision history. Also reports the Storacha DID and space DID.
+
+```bash
+curl http://localhost:3001/api/knowledge/identity
+```
+
+```json
+{
+  "manifesto": {
+    "agentId": "did:key:z6MkAbc...",
+    "name": "Worker Alpha",
+    "role": "DAO governance agent",
+    "values": ["decentralization", "long-term sustainability"],
+    "guidelines": "Vote to preserve the DAO's core values..."
+  },
+  "preferences": {
+    "votingWeights": { "financial_impact": 0.4, "community_benefit": 0.6 },
+    "knowledgeNotes": ["Prioritize grants under 5,000 NEAR"],
+    "updatedAt": "2026-03-17T09:00:00.000Z"
+  },
+  "recentDecisions": [
+    {
+      "proposalId": "3",
+      "proposal": "Fund a UI redesign...",
+      "vote": "Approved",
+      "reasoning": "Aligns with community engagement values...",
+      "timestamp": "2026-03-16T15:30:00.000Z"
+    }
+  ],
+  "formatted": "=== AGENT IDENTITY ===\nAgent: Worker Alpha...",
+  "storacha": {
+    "configured": true,
+    "agentDid": "did:key:z6MkAbc...",
+    "spaceDid": "did:key:z6MkXyz..."
+  }
+}
+```
+
+---
+
+### GET /api/knowledge/health
+
+Reports whether the Storacha identity is configured and returns the agent's DID and space DID.
+
+```bash
+curl http://localhost:3001/api/knowledge/health
+```
+
+```json
+{
+  "storachaConfigured": true,
+  "agentDid": "did:key:z6MkAbc...",
+  "spaceDid": "did:key:z6MkXyz..."
+}
+```
+
+<Tip>
+Use this endpoint to confirm that a worker's Storacha identity was set up correctly before running your first vote.
+</Tip>

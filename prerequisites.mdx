@@ -1,0 +1,207 @@
+---
+title: "Prerequisites"
+description: "Everything you need to install and configure before running Delibera locally or deploying to production."
+---
+
+## Required tools
+
+### Node.js 22+
+
+Delibera's coordinator and worker agents require Node.js 22 or later. Check your current version with:
+
+```bash
+node --version
+```
+
+<CodeGroup>
+
+```bash macOS (Homebrew)
+brew install node@22
+brew link node@22
+```
+
+```bash Ubuntu / Debian
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+sudo apt-get install -y nodejs
+```
+
+```bash Windows (winget)
+winget install OpenJS.NodeJS.LTS
+```
+
+```bash Any platform (fnm)
+curl -fsSL https://fnm.vercel.app/install | bash
+fnm install 22
+fnm use 22
+```
+
+</CodeGroup>
+
+### Rust and the wasm32 target
+
+Rust is required to build the NEAR smart contracts. After installing Rust, add the WebAssembly target used by the NEAR build toolchain.
+
+<CodeGroup>
+
+```bash macOS / Linux
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source $HOME/.cargo/env
+rustup target add wasm32-unknown-unknown
+```
+
+```powershell Windows
+# Download and run rustup-init.exe from https://rustup.rs
+# Then in a new terminal:
+rustup target add wasm32-unknown-unknown
+```
+
+</CodeGroup>
+
+Verify the installation:
+
+```bash
+rustc --version
+cargo --version
+rustup target list --installed | grep wasm32
+```
+
+### NEAR CLI
+
+NEAR CLI RS is used for account management, contract calls, and inspecting on-chain state.
+
+```bash
+npm install -g near-cli-rs
+near --version
+```
+
+<Note>
+  NEAR CLI RS is the current generation of the NEAR command-line tool. The legacy `near-cli` (JavaScript) still works for basic operations, but NEAR CLI RS is recommended for all new development.
+</Note>
+
+---
+
+## NEAR testnet account
+
+You need a NEAR testnet account to act as the contract owner and fund the coordinator agent.
+
+**Create a testnet account:**
+
+```bash
+# Interactive account creation (opens browser)
+near account create-account
+```
+
+Alternatively, create an account at [testnet.mynearwallet.com](https://testnet.mynearwallet.com).
+
+**Export your credentials** to the local keystore:
+
+```bash
+near account export-account <your-account>.testnet \
+  --seed-phrase \
+  network-config testnet
+```
+
+The `NEAR_SEED_PHRASE` environment variable in the coordinator agent accepts this seed phrase directly.
+
+<Tip>
+  Use a dedicated testnet account for Delibera rather than a personal account. The coordinator agent needs to sign transactions on your behalf.
+</Tip>
+
+---
+
+## Required API keys
+
+### Ensue API key
+
+Ensue Memory Network is the off-chain coordination layer. Both the coordinator and worker agents require an Ensue API key.
+
+1. Create an account at [ensue.dev](https://ensue.dev)
+2. Generate an API key from your dashboard
+3. Set both `ENSUE_API_KEY` and `ENSUE_TOKEN` to this value in your environment files
+
+<Warning>
+  `ENSUE_API_KEY` and `ENSUE_TOKEN` currently accept the same key value. Both must be set, or the coordinator will warn on startup and coordination will not function.
+</Warning>
+
+### NEAR AI API key
+
+NEAR AI hosts the DeepSeek-V3.1 model used by voter agents for deliberation. Each worker agent requires a NEAR AI API key.
+
+1. Sign up at [cloud-api.near.ai](https://cloud-api.near.ai)
+2. Generate an API key
+3. Set `NEAR_API_KEY` in each worker agent's environment file
+
+---
+
+## Optional: Storacha account
+
+Storacha provides encrypted persistent storage for deliberation transcripts. It is optional for local development — agents start successfully without it and skip archival.
+
+For production deployments, Storacha is required.
+
+**Set up a Storacha account:**
+
+```bash
+# Install the CLI
+npm install -g @storacha/cli
+
+# Log in (email link confirmation)
+storacha login you@example.com
+
+# Create a storage space
+storacha space create delibera-v2
+storacha space provision --provider did:web:storacha.network
+```
+
+**Generate a `did:key` identity for each agent:**
+
+```bash
+storacha key create
+# → Private key: MgCZG7...   ← STORACHA_AGENT_PRIVATE_KEY
+# → Agent DID:   did:key:z6Mk...
+```
+
+**Create a UCAN delegation for each agent DID:**
+
+```bash
+storacha delegation create <AGENT_DID> \
+  --can 'space/blob/add' --can 'space/index/add' \
+  --can 'upload/add' --can 'upload/list' \
+  --can 'space/content/decrypt' \
+  -o delegation.car
+
+base64 delegation.car
+# → STORACHA_DELEGATION_PROOF (base64 string)
+```
+
+You need one `did:key` identity and delegation **per agent** — one for the coordinator, one for each worker. Each agent's private key must be unique.
+
+---
+
+## Optional: Phala Cloud (production TEE)
+
+For production deployments, agents run inside **Phala TEE** (Trusted Execution Environment) containers on Phala Cloud.
+
+- Create an account at [cloud.phala.network](https://cloud.phala.network)
+- Generate a Phala API key
+- Set `PHALA_API_KEY` in your root `.env` file
+- Set `PHALA_CVM_ID` to the CVM ID assigned to your deployed container
+
+<Info>
+  Phala TEE is not required for local development. Set `LOCAL_MODE=true` in the coordinator agent to skip all TEE-related initialization.
+</Info>
+
+---
+
+## Summary checklist
+
+| Requirement | Required for local dev | Required for production |
+|-------------|----------------------|------------------------|
+| Node.js 22+ | Yes | Yes |
+| Rust + wasm32 target | Yes (contract builds) | Yes |
+| NEAR CLI | Yes | Yes |
+| NEAR testnet account | Yes | Yes (mainnet for prod) |
+| Ensue API key | Yes | Yes |
+| NEAR AI API key | Yes | Yes |
+| Storacha account + keys | No | Yes |
+| Phala Cloud API key | No | Yes |

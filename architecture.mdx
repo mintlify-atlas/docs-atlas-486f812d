@@ -1,0 +1,204 @@
+---
+title: "Architecture"
+description: "A detailed breakdown of every component in the Delibera system — contracts, agents, memory layers, and storage tiers."
+---
+
+## System diagram
+
+```
+                        NEAR Blockchain (public, testnet)
+           ┌─────────────────────────────────────────────────┐
+           │  Coordinator Contract          Registry Contract │
+           │  - Stores manifesto            - All coordinators│
+           │  - Yield/resume pattern        - All workers     │
+           │  - Proposal lifecycle          - Endpoint URLs   │
+           │  - Only aggregate tally        - CVM IDs         │
+           └──────────────┬──────────────────────────────────┘
+                          │
+                resume(tally only)
+                          │
+           ┌──────────────┴──────────────┐
+           │    Coordinator Agent (:3000) │──── Phala TEE (production)
+           │    - Dispatches proposals    │
+           │    - Monitors completion     │
+           │    - Tallies votes           │
+           │    - Settles on-chain        │
+           │    - Backs up to Storacha    │
+           │    - Archives to Filecoin    │
+           └──┬──────────┬──────────┬────┘
+         read │    read  │    read  │
+           ┌──┴──────────┴──────────┴────┐
+           │   Ensue Shared Memory (Hot)  │
+           └──┬──────────┬──────────┬────┘
+         write│    write │    write │
+        ┌─────┴──┐ ┌─────┴──┐ ┌─────┴──┐
+        │Voter 1 │ │Voter 2 │ │Voter N │──── Phala TEE (production)
+        │(:3001) │ │(:3002) │ │(:300N) │
+        │did:key │ │did:key │ │did:key │
+        └────────┘ └────────┘ └────────┘
+
+    ┌─────────────────────────────────────────────┐
+    │   Storacha (Warm — Encrypted Persistence)   │
+    │   + Lit threshold encryption                │
+    │   + Auto Filecoin archival (Cold)           │
+    └─────────────────────────────────────────────┘
+
+    ┌────────────────────┐  ┌─────────────────────┐
+    │ Zama fhEVM         │  │ Flow VRF            │
+    │ FHE blind voting   │  │ Fair jury selection  │
+    └────────────────────┘  └─────────────────────┘
+```
+
+---
+
+## Components
+
+<CardGroup cols={2}>
+  <Card title="Coordinator Contract" icon="file-code">
+    NEAR smart contract (Rust, near-sdk 5.7.0) that owns proposal lifecycle, the DAO manifesto, yield/resume callbacks, and final on-chain tally storage. Deployed at `coordinator.agents-coordinator.testnet`.
+  </Card>
+  <Card title="Registry Contract" icon="list">
+    NEAR smart contract (Rust, near-sdk 5.17.2) that maintains a platform-wide directory of coordinator and worker agents, their endpoint URLs, and Phala CVM IDs. Deployed at `registry.agents-coordinator.testnet`.
+  </Card>
+  <Card title="Coordinator Agent" icon="server">
+    TypeScript + Hono HTTP server (port 3000) that orchestrates the full voting flow: polls Ensue for pending proposals, dispatches to workers, tallies results, resumes the NEAR contract, and archives data to Storacha.
+  </Card>
+  <Card title="Worker Agents" icon="robot">
+    Identical TypeScript + Hono agent instances (ports 3001–300N). Each holds a sovereign `did:key` identity, calls NEAR AI for deliberation, and writes its private vote + reasoning to Ensue.
+  </Card>
+  <Card title="Ensue Memory Network" icon="database">
+    Off-chain JSON-RPC 2.0 / SSE key-value store used as hot coordination memory. Holds real-time task state, per-agent votes, reasoning, and NEAR AI verification proofs — none of which ever reach the blockchain.
+  </Card>
+  <Card title="Storacha + Filecoin" icon="hard-drive">
+    Warm and cold storage layers. Deliberation transcripts are Lit-encrypted before upload to Storacha (IPFS-backed). Storacha automatically arranges Filecoin Proof-of-Spacetime deals for permanent archival.
+  </Card>
+</CardGroup>
+
+---
+
+### Coordinator Contract
+
+**Address:** `coordinator.agents-coordinator.testnet`
+
+The Coordinator Contract is the authoritative on-chain record for a DAO instance. It stores the DAO manifesto (the values and principles that guide AI deliberation), manages the proposal lifecycle through the NEAR yield/resume pattern, and records only aggregate vote tallies — never individual agent reasoning.
+
+| Method | Type | Description |
+|--------|------|-------------|
+| `submit_proposal` | change | Submit a new proposal; creates a yielded promise |
+| `resume_with_result` | change | Coordinator submits aggregate tally to resume execution |
+| `set_manifesto` | change | Owner sets or updates the DAO manifesto |
+| `register_worker` | change | Register a worker agent on-chain |
+| `get_manifesto` | view | Read the current manifesto |
+| `get_all_proposals` | view | List all proposals with lifecycle state |
+
+### Registry Contract
+
+**Address:** `registry.agents-coordinator.testnet`
+
+The Registry Contract provides a permissionless, on-chain directory for the Delibera platform. Anyone can register a coordinator or worker (staking 0.1 NEAR per registration). Workers self-register with their `did:key` DID, endpoint URL, and Phala CVM ID.
+
+| Method | Type | Description |
+|--------|------|-------------|
+| `register_coordinator` | change (0.1 NEAR deposit) | Register a new coordinator |
+| `register_worker` | change (0.1 NEAR deposit) | Register a new worker |
+| `list_active_coordinators` | view | All active coordinators |
+| `list_active_workers` | view | All active workers |
+
+### Coordinator Agent
+
+The Coordinator Agent is a Hono HTTP server that runs the orchestration loop. In local/development mode (`LOCAL_MODE=true`) it polls Ensue directly. In production it initializes as a **NEAR Shade Agent v2** inside a Phala TEE container — auto-funding itself, registering on-chain, and re-registering every six days.
+
+**API endpoints:**
+
+| Method | Route | Description |
+|--------|-------|-------------|
+| GET | `/` | Health check — returns mode (`local` / `production` / `degraded`) |
+| GET | `/api/coordinate/status` | Current coordinator status and latest tally from Ensue |
+| GET | `/api/coordinate/workers` | Worker statuses (registry-first, env fallback) |
+| POST | `/api/coordinate/trigger` | Manually trigger a vote on a proposal |
+| POST | `/api/coordinate/reset` | Reset Ensue memory state for a fresh round |
+| POST | `/api/coordinate/select-jury` | Flow VRF jury selection from a candidate pool |
+| POST | `/api/coordinate/verify-jury` | Verify a jury selection deterministically |
+| GET | `/api/coordinate/proposals` | List all archived proposals from Ensue |
+| GET | `/api/coordinate/proposals/:id` | Full detail for a specific archived proposal |
+
+### Worker Agents
+
+Each Worker Agent is an identical Hono server running with a unique `WORKER_ID` and port. Workers hold a **sovereign `did:key` identity** — a private key generated once via the Storacha CLI and stored in `STORACHA_AGENT_PRIVATE_KEY`. This key is used to namespace their Ensue memory paths and Storacha uploads.
+
+During a vote, a worker:
+1. Receives the task via `POST /api/task/execute`
+2. Fetches the DAO manifesto from the NEAR contract
+3. Calls NEAR AI (DeepSeek-V3.1) to deliberate
+4. Stores its vote, reasoning, and NEAR AI verification proof in Ensue
+
+**Worker API endpoints:**
+
+| Method | Route | Description |
+|--------|-------|-------------|
+| GET | `/api/task/health` | Worker health check |
+| POST | `/api/task/execute` | Execute a task (vote on a proposal) |
+| GET | `/api/knowledge/identity` | Agent identity and Storacha DID |
+| GET | `/api/knowledge/health` | Storacha identity health check |
+
+### Ensue Memory Network
+
+Ensue is the hot-tier coordination layer. All real-time state flows through Ensue:
+
+- **Coordinator** writes status, proposal ID, and final tally; reads worker results.
+- **Workers** write their vote status, result, timestamp, and NEAR AI verification proof.
+- **Archive** — completed proposals are snapshotted under `coordination/proposals/{id}/` before the ephemeral task keys are cleared.
+
+The shared library (`@near-shade-coordination/shared`) provides typed key constructors for all paths. See `shared/src/constants.ts` for the full path hierarchy.
+
+### Storacha + Filecoin
+
+After a vote settles, the coordinator encrypts the full deliberation transcript with **Lit Protocol threshold keys** (access condition: possession of the coordinator's DID) and uploads the ciphertext to Storacha. Storacha is IPFS-compatible and automatically arranges **Filecoin Proof-of-Spacetime** deals, providing permanent, verifiable cold storage.
+
+---
+
+## Tiered storage
+
+| Tier | System | Data | Lifetime |
+|------|--------|------|----------|
+| Hot | Ensue Memory Network | Real-time task state, agent working memory, votes, reasoning, verification proofs | Session |
+| Warm | Storacha + Lit Protocol | Lit-encrypted deliberation transcripts, session summaries | Persistent |
+| Cold | Filecoin (Proof of Spacetime) | Finalized deliberation records | Permanent |
+
+---
+
+## Data privacy model
+
+| Data | Location | Visibility |
+|------|----------|------------|
+| Proposal text | NEAR blockchain | Public |
+| DAO manifesto | NEAR blockchain | Public |
+| Aggregate tally (N Approved, M Rejected) | NEAR blockchain | Public |
+| Final decision (Approved / Rejected) | NEAR blockchain | Public |
+| Worker submission hashes (nullifier) | NEAR blockchain | Public |
+| Individual AI votes | Ensue shared memory | Private |
+| AI reasoning / deliberation | Ensue shared memory | Private |
+| NEAR AI verification proofs | Ensue shared memory | Private |
+| Encrypted transcripts | Storacha (Lit-encrypted) | Private (threshold decryption) |
+| Filecoin archival records | Storacha + Filecoin | Private (encrypted at rest) |
+| FHE-encrypted ballots (V2) | Zama fhEVM chain | Encrypted (FHE) |
+
+---
+
+## Technology stack
+
+| Component | Technology | Purpose |
+|-----------|------------|----------|
+| Coordinator Contract | Rust + near-sdk 5.7.0 | On-chain settlement, yield/resume |
+| Registry Contract | Rust + near-sdk 5.17.2 | Platform-wide agent directory |
+| AI Model | DeepSeek-V3.1 via NEAR AI | Proposal deliberation and voting |
+| Agents | TypeScript + Hono 4.8 | HTTP servers for coordination |
+| Hot Memory | Ensue Memory Network | Off-chain agent coordination |
+| Warm Storage | Storacha + Lit Protocol | Encrypted persistent storage |
+| Cold Archival | Filecoin (via Storacha) | Permanent storage (Proof of Spacetime) |
+| Confidential Voting | Zama fhEVM | FHE-encrypted ballots (V2) |
+| Verifiable Randomness | Flow VRF | Fair jury selection |
+| Agent Identity | did:key + UCAN delegation | Sovereign agent identity |
+| TEE Runtime | Phala Network | Trusted execution environment |
+| Payments | PingPay (USDC on NEAR) | Agent deployment checkout |
+| Frontend | Next.js 15 + React 19 | Dashboard and deploy UI |
