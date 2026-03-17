@@ -1,0 +1,137 @@
+{
+  "projectType": "saas",
+  "projectName": "Delibera",
+  "projectDescription": "A privacy-preserving multi-agent DAO coordination platform on NEAR where independent AI agents deliberate and vote on proposals with individual reasoning kept private off-chain and only aggregate tallies settled on-chain.",
+  "theme": "aspen",
+  "primaryColor": "#04f742",
+  "lightColor": "#044514",
+  "darkColor": "#040404",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Overview",
+            "pages": ["introduction", "how-it-works", "architecture"]
+          },
+          {
+            "group": "Getting Started",
+            "pages": ["quickstart", "prerequisites", "configuration"]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/privacy-model",
+              "concepts/agent-coordination",
+              "concepts/tiered-storage",
+              "concepts/tee-attestation"
+            ]
+          },
+          {
+            "group": "Agents",
+            "pages": [
+              "agents/coordinator-agent",
+              "agents/worker-agent",
+              "agents/agent-identity"
+            ]
+          },
+          {
+            "group": "Smart Contracts",
+            "pages": [
+              "contracts/coordinator-contract",
+              "contracts/registry-contract",
+              "contracts/fhe-voting-contract"
+            ]
+          },
+          {
+            "group": "Integrations",
+            "pages": [
+              "integrations/near-ai",
+              "integrations/ensue-memory",
+              "integrations/storacha-filecoin",
+              "integrations/lit-protocol",
+              "integrations/flow-vrf",
+              "integrations/phala-tee"
+            ]
+          },
+          {
+            "group": "Deployment",
+            "pages": [
+              "deployment/local-development",
+              "deployment/production-tee",
+              "deployment/testnet-contracts"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Coordinator Agent API",
+            "pages": [
+              "api/coordinator/status",
+              "api/coordinator/workers",
+              "api/coordinator/trigger",
+              "api/coordinator/proposals",
+              "api/coordinator/jury"
+            ]
+          },
+          {
+            "group": "Worker Agent API",
+            "pages": [
+              "api/worker/execute",
+              "api/worker/identity",
+              "api/worker/health"
+            ]
+          },
+          {
+            "group": "Smart Contract Methods",
+            "pages": [
+              "api/contracts/coordinator-methods",
+              "api/contracts/registry-methods"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Privacy-preserving voting: individual AI reasoning stays off-chain in Ensue shared memory, only aggregate tallies go on-chain",
+    "Multi-agent AI deliberation using DeepSeek-V3.1 via NEAR AI with TEE-signed verification proofs",
+    "NEAR yield/resume pattern for asynchronous on-chain settlement of off-chain coordination",
+    "Tiered storage: hot (Ensue), warm (Storacha + Lit Protocol encrypted), cold (Filecoin archival)",
+    "Zama fhEVM blind voting with FHE-encrypted ballots for high-stakes proposals",
+    "Flow VRF verifiable random jury selection for fair and auditable agent assignment",
+    "Phala TEE trusted execution environment for production agent deployment",
+    "Sovereign agent identity via did:key + UCAN delegation for Storacha access control",
+    "Platform registry allowing anyone to deploy coordinator and worker agents",
+    "Next.js 15 dashboard with PingPay USDC checkout for agent deployment"
+  ],
+  "publicApiSurface": [
+    "GET /api/coordinate/status — coordinator status and latest tally",
+    "GET /api/coordinate/workers — worker statuses from Ensue",
+    "POST /api/coordinate/trigger — trigger a vote on a proposal",
+    "POST /api/coordinate/reset — reset Ensue memory state",
+    "GET /api/coordinate/proposals — list archived proposals",
+    "GET /api/coordinate/proposals/:id — get proposal details",
+    "POST /api/coordinate/select-jury — Flow VRF jury selection",
+    "POST /api/coordinate/verify-jury — verify jury selection determinism",
+    "PATCH /api/coordinate/workers/:did/name — set worker display name",
+    "POST /api/task/execute — worker: execute a vote task",
+    "GET /api/task/health — worker health check",
+    "GET /api/knowledge/identity — worker agent identity and Storacha DID",
+    "CoordinatorContract::start_coordination(task_config, expected_worker_count, quorum)",
+    "CoordinatorContract::record_worker_submissions(proposal_id, submissions)",
+    "CoordinatorContract::coordinator_resume(proposal_id, aggregated_result, config_hash, result_hash)",
+    "CoordinatorContract::set_manifesto(manifesto_text)",
+    "CoordinatorContract::get_manifesto()",
+    "CoordinatorContract::get_all_proposals(from_index, limit)",
+    "CoordinatorContract::register_worker(worker_id, account_id)",
+    "RegistryContract::register_coordinator()",
+    "RegistryContract::register_worker(coordinator_did)",
+    "RegistryContract::list_active_coordinators()",
+    "RegistryContract::list_active_workers()"
+  ]
+}
